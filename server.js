@@ -180,7 +180,7 @@ io.on('connection', (socket) => {
                 gameState.winner = { username: players[tid].username, prize, cardId: data.cardId };
                 await User.findOneAndUpdate({ telegramId: tid }, { $inc: { balance: prize } });
                 gameState.phase = 'WINNER'; 
-                gameState.phaseEndTime = Date.now() + 10000;
+                gameState.phaseEndTime = Date.now() + 7000;
                 io.emit('game_tick', gameState);
             }
         }
