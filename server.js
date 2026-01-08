@@ -17,7 +17,7 @@ const io = new Server(server, { cors: { origin: "*" } });
 app.use(cors());
 app.use(express.json());
 
-// --- DATABASE MODELS ---
+// --- DATABASE ---
 mongoose.connect(MONGODB_URI).then(() => console.log("✅ MongoDB Connected"));
 
 const User = mongoose.model('User', new mongoose.Schema({
@@ -31,8 +31,7 @@ const User = mongoose.model('User', new mongoose.Schema({
 const VerifiedSMS = mongoose.model('VerifiedSMS', new mongoose.Schema({
     refNumber: { type: String, unique: true },
     amount: Number,
-    isUsed: { type: Boolean, default: false },
-    createdAt: { type: Date, default: Date.now, expires: 172800 } 
+    isUsed: { type: Boolean, default: false }
 }));
 
 // --- BINGO UTILS ---
@@ -77,18 +76,18 @@ function checkServerWin(card, drawnNumbers) {
 // --- GAME STATE ---
 let gameState = { 
     phase: 'SELECTION', 
-    phaseEndTime: Date.now() + 40000, // Strict 40s
+    phaseEndTime: Date.now() + 40000, 
     timer: 40, 
     drawnNumbers: [], 
     pot: 0, 
     winner: null, 
-    totalPlayers: 0, // Requirement: Based on Cartelas
+    totalPlayers: 0, 
     takenCards: [] 
 };
 let players = {}; 
 let socketToUser = {};
 
-// Main Game Loop (1 Second Tick)
+// Main Game Loop
 setInterval(async () => {
     const now = Date.now();
     let timeLeft = Math.ceil((gameState.phaseEndTime - now) / 1000);
@@ -99,13 +98,14 @@ setInterval(async () => {
         let totalCardsSold = 0;
         Object.values(players).forEach(p => { if (p.cards) totalCardsSold += p.cards.length; });
         
-        gameState.totalPlayers = totalCardsSold; // Requirement: players = card count
-        gameState.pot = totalCardsSold * 10;     // Requirement: 10 Birr per card
+        gameState.totalPlayers = totalCardsSold;
+        gameState.pot = totalCardsSold * 10;
 
+        // If time is up
         if (timeLeft <= 0) {
             if (totalCardsSold >= 2) {
+                // START GAME
                 gameState.phase = 'GAMEPLAY';
-                // Deduct Balance from users
                 for (let tid in players) {
                     if (players[tid].cards?.length > 0) {
                         const cost = players[tid].cards.length * 10;
@@ -114,8 +114,9 @@ setInterval(async () => {
                     }
                 }
             } else {
-                // Not enough players, reset 40s timer
+                // RESET TIMER: Not enough cartelas (less than 2)
                 gameState.phaseEndTime = Date.now() + 40000;
+                gameState.timer = 40;
             }
         }
     }
@@ -128,7 +129,7 @@ setInterval(async () => {
     io.emit('game_tick', gameState);
 }, 1000);
 
-// Ball Drawing (4 Second Drawing)
+// Faster Drawing (2.5 Seconds)
 setInterval(() => {
     if (gameState.phase === 'GAMEPLAY' && !gameState.winner && gameState.drawnNumbers.length < 75) {
         let n;
@@ -136,16 +137,14 @@ setInterval(() => {
         gameState.drawnNumbers.push(n);
         io.emit('number_drawn', gameState.drawnNumbers);
     }
-}, 4000);
+}, 2500); // Changed from 4000 to 2500 for speed
 
 // --- SOCKETS ---
 io.on('connection', (socket) => {
     socket.on('register_user', async (data) => {
         try {
             const urlParams = new URLSearchParams(data.initData);
-            const userStr = urlParams.get('user');
-            if(!userStr) return;
-            const userData = JSON.parse(userStr);
+            const userData = JSON.parse(urlParams.get('user'));
             const tid = userData.id.toString();
             socket.join(tid);
             socketToUser[socket.id] = tid;
@@ -176,17 +175,16 @@ io.on('connection', (socket) => {
         if (tid && gameState.phase === 'GAMEPLAY' && !gameState.winner) {
             const card = generateServerCard(data.cardId);
             if (checkServerWin(card, gameState.drawnNumbers)) {
-                // Requirement: 80% to winner, 20% to admin (kept in server)
+                // 80% to Winner, 20% to Admin
                 const prize = Math.floor(gameState.pot * 0.8);
                 gameState.winner = { username: players[tid].username, prize, cardId: data.cardId };
                 await User.findOneAndUpdate({ telegramId: tid }, { $inc: { balance: prize } });
                 gameState.phase = 'WINNER'; 
-                gameState.phaseEndTime = Date.now() + 10000; // Show winner screen for 10s
+                gameState.phaseEndTime = Date.now() + 10000;
                 io.emit('game_tick', gameState);
             }
         }
     });
-
     socket.on('disconnect', () => { delete socketToUser[socket.id]; });
 });
 
@@ -200,24 +198,16 @@ const menu = () => Markup.inlineKeyboard([
 ]);
 
 bot.start(async (ctx) => {
-    const user = await User.findOneAndUpdate(
-        { telegramId: ctx.from.id.toString() }, 
-        { username: ctx.from.first_name }, 
-        { upsert: true, new: true }
-    );
+    const user = await User.findOneAndUpdate({ telegramId: ctx.from.id.toString() }, { username: ctx.from.first_name }, { upsert: true, new: true });
     if (!user.isRegistered) {
-        return ctx.reply("Welcome! Please share your phone number to start playing.", 
-            Markup.keyboard([[Markup.button.contactRequest("📱 Register Phone")]]).resize().oneTime());
+        return ctx.reply("Please register your phone to play.", Markup.keyboard([[Markup.button.contactRequest("📱 Register Phone")]]).resize().oneTime());
     }
     ctx.reply(`Welcome back ${user.username}!`, menu());
 });
 
 bot.on('contact', async (ctx) => {
-    await User.findOneAndUpdate({ telegramId: ctx.from.id.toString() }, { 
-        phoneNumber: ctx.message.contact.phone_number, 
-        isRegistered: true 
-    });
-    ctx.reply("✅ Registration Complete!", menu());
+    await User.findOneAndUpdate({ telegramId: ctx.from.id.toString() }, { phoneNumber: ctx.message.contact.phone_number, isRegistered: true });
+    ctx.reply("✅ Registered!", menu());
 });
 
 bot.on('text', async (ctx) => {
@@ -228,7 +218,7 @@ bot.on('text', async (ctx) => {
             sms.isUsed = true; await sms.save();
             const u = await User.findOneAndUpdate({ telegramId: ctx.from.id.toString() }, { $inc: { balance: sms.amount } }, { new: true });
             io.to(u.telegramId).emit('balance_update', u.balance);
-            ctx.reply(`✅ Added ${sms.amount} Birr to your account!`);
+            ctx.reply(`✅ Added ${sms.amount} Birr!`);
         }
     }
 });
@@ -236,12 +226,12 @@ bot.on('text', async (ctx) => {
 bot.action('bal', async (ctx) => {
     const u = await User.findOne({ telegramId: ctx.from.id.toString() });
     ctx.answerCbQuery();
-    ctx.reply(`Your balance: ${u?.balance || 0} Birr`);
+    ctx.reply(`Balance: ${u?.balance || 0} Birr`);
 });
 
 bot.launch().then(() => console.log("🤖 Bot Live"));
 
-// --- STATIC FILES (Graphics fix) ---
+// --- STATIC SERVING ---
 const publicPath = path.resolve(__dirname, 'public');
 app.use(express.static(publicPath));
 app.get('*', (req, res) => {
@@ -249,4 +239,4 @@ app.get('*', (req, res) => {
     res.sendFile(path.join(publicPath, 'index.html'));
 });
 
-server.listen(PORT, '0.0.0.0', () => console.log(`🚀 Server live on port ${PORT}`));
+server.listen(PORT, '0.0.0.0', () => console.log(`🚀 Live on ${PORT}`));
