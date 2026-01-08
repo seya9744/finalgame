@@ -1,4 +1,4 @@
-// VERSION 3 - STAR AND BET FIX
+
 require('dotenv').config();
 const { Telegraf, Markup, session } = require('telegraf');
 const express = require('express');
