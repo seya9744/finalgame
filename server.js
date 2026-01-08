@@ -8,7 +8,6 @@ const mongoose = require('mongoose');
 const path = require('path');
 const fs = require('fs');
 
-// --- CONFIG ---
 const { BOT_TOKEN, MONGODB_URI, PORT = 3001, MINI_APP_URL } = process.env;
 const app = express();
 const server = http.createServer(app);
@@ -18,7 +17,7 @@ app.use(cors());
 app.use(express.json());
 
 // --- DATABASE ---
-mongoose.connect(MONGODB_URI).then(() => console.log("✅ MongoDB Connected"));
+mongoose.connect(MONGODB_URI).then(() => console.log("✅ DB Connected"));
 
 const User = mongoose.model('User', new mongoose.Schema({
     telegramId: { type: String, unique: true },
@@ -34,7 +33,7 @@ const VerifiedSMS = mongoose.model('VerifiedSMS', new mongoose.Schema({
     isUsed: { type: Boolean, default: false }
 }));
 
-// --- BINGO UTILS ---
+// --- BINGO LOGIC ---
 function generateServerCard(id) {
     const seed = parseInt(id) || 1;
     const rng = (s) => {
@@ -74,16 +73,7 @@ function checkServerWin(card, drawnNumbers) {
 }
 
 // --- GAME STATE ---
-let gameState = { 
-    phase: 'SELECTION', 
-    phaseEndTime: Date.now() + 40000, 
-    timer: 40, 
-    drawnNumbers: [], 
-    pot: 0, 
-    winner: null, 
-    totalPlayers: 0, 
-    takenCards: [] 
-};
+let gameState = { phase: 'SELECTION', phaseEndTime: Date.now() + 40000, timer: 40, drawnNumbers: [], pot: 0, winner: null, totalPlayers: 0, takenCards: [] };
 let players = {}; 
 let socketToUser = {};
 
@@ -97,15 +87,13 @@ setInterval(async () => {
     if (gameState.phase === 'SELECTION') {
         let totalCardsSold = 0;
         Object.values(players).forEach(p => { if (p.cards) totalCardsSold += p.cards.length; });
-        
         gameState.totalPlayers = totalCardsSold;
         gameState.pot = totalCardsSold * 10;
 
-        // If time is up
         if (timeLeft <= 0) {
             if (totalCardsSold >= 2) {
-                // START GAME
                 gameState.phase = 'GAMEPLAY';
+                // DEDUCT STAKE
                 for (let tid in players) {
                     if (players[tid].cards?.length > 0) {
                         const cost = players[tid].cards.length * 10;
@@ -114,7 +102,6 @@ setInterval(async () => {
                     }
                 }
             } else {
-                // RESET TIMER: Not enough cartelas (less than 2)
                 gameState.phaseEndTime = Date.now() + 40000;
                 gameState.timer = 40;
             }
@@ -129,7 +116,7 @@ setInterval(async () => {
     io.emit('game_tick', gameState);
 }, 1000);
 
-// Faster Drawing (2.5 Seconds)
+// FAST DRAWING (2.5 Seconds)
 setInterval(() => {
     if (gameState.phase === 'GAMEPLAY' && !gameState.winner && gameState.drawnNumbers.length < 75) {
         let n;
@@ -137,15 +124,15 @@ setInterval(() => {
         gameState.drawnNumbers.push(n);
         io.emit('number_drawn', gameState.drawnNumbers);
     }
-}, 2500); // Changed from 4000 to 2500 for speed
+}, 2500);
 
 // --- SOCKETS ---
 io.on('connection', (socket) => {
     socket.on('register_user', async (data) => {
         try {
             const urlParams = new URLSearchParams(data.initData);
-            const userData = JSON.parse(urlParams.get('user'));
-            const tid = userData.id.toString();
+            const user = JSON.parse(urlParams.get('user'));
+            const tid = user.id.toString();
             socket.join(tid);
             socketToUser[socket.id] = tid;
             const u = await User.findOne({ telegramId: tid });
@@ -162,10 +149,8 @@ io.on('connection', (socket) => {
         if (tid && gameState.phase === 'SELECTION') {
             const u = await User.findOne({ telegramId: tid });
             if (!u || u.balance < cardIds.length * 10) return socket.emit('error_message', "Insufficient Balance!");
-            
             players[tid].cards = cardIds;
-            let all = [];
-            Object.values(players).forEach(pl => { if(pl.cards) all.push(...pl.cards); });
+            let all = []; Object.values(players).forEach(pl => { if(pl.cards) all.push(...pl.cards); });
             gameState.takenCards = all;
         }
     });
@@ -175,68 +160,35 @@ io.on('connection', (socket) => {
         if (tid && gameState.phase === 'GAMEPLAY' && !gameState.winner) {
             const card = generateServerCard(data.cardId);
             if (checkServerWin(card, gameState.drawnNumbers)) {
-                // 80% to Winner, 20% to Admin
                 const prize = Math.floor(gameState.pot * 0.8);
                 gameState.winner = { username: players[tid].username, prize, cardId: data.cardId };
                 await User.findOneAndUpdate({ telegramId: tid }, { $inc: { balance: prize } });
                 gameState.phase = 'WINNER'; 
-                gameState.phaseEndTime = Date.now() + 7000;
+                gameState.phaseEndTime = Date.now() + 7000; // 7 SECOND DISPLAY
                 io.emit('game_tick', gameState);
             }
         }
     });
-    socket.on('disconnect', () => { delete socketToUser[socket.id]; });
 });
 
-// --- TELEGRAM BOT ---
+// --- BOT ---
 const bot = new Telegraf(BOT_TOKEN);
-bot.use(session());
-
-const menu = () => Markup.inlineKeyboard([
-    [Markup.button.webApp("Play Bingo 🎮", MINI_APP_URL)],
-    [Markup.button.callback("Check Balance 💵", "bal"), Markup.button.callback("Deposit 💰", "dep")]
-]);
-
 bot.start(async (ctx) => {
     const user = await User.findOneAndUpdate({ telegramId: ctx.from.id.toString() }, { username: ctx.from.first_name }, { upsert: true, new: true });
-    if (!user.isRegistered) {
-        return ctx.reply("Please register your phone to play.", Markup.keyboard([[Markup.button.contactRequest("📱 Register Phone")]]).resize().oneTime());
-    }
-    ctx.reply(`Welcome back ${user.username}!`, menu());
+    if (!user.isRegistered) return ctx.reply("Share phone to play.", Markup.keyboard([[Markup.button.contactRequest("📱 Share Phone")]]).resize().oneTime());
+    ctx.reply("Welcome!", Markup.inlineKeyboard([[Markup.button.webApp("Play Bingo 🎮", MINI_APP_URL)]]));
 });
-
 bot.on('contact', async (ctx) => {
     await User.findOneAndUpdate({ telegramId: ctx.from.id.toString() }, { phoneNumber: ctx.message.contact.phone_number, isRegistered: true });
-    ctx.reply("✅ Registered!", menu());
+    ctx.reply("✅ Registered!", Markup.inlineKeyboard([[Markup.button.webApp("Play Bingo 🎮", MINI_APP_URL)]]));
 });
+bot.launch();
 
-bot.on('text', async (ctx) => {
-    const refMatch = ctx.message.text.match(/[A-Z0-9]{10,12}/);
-    if (refMatch) {
-        const sms = await VerifiedSMS.findOne({ refNumber: refMatch[0], isUsed: false });
-        if (sms) {
-            sms.isUsed = true; await sms.save();
-            const u = await User.findOneAndUpdate({ telegramId: ctx.from.id.toString() }, { $inc: { balance: sms.amount } }, { new: true });
-            io.to(u.telegramId).emit('balance_update', u.balance);
-            ctx.reply(`✅ Added ${sms.amount} Birr!`);
-        }
-    }
-});
-
-bot.action('bal', async (ctx) => {
-    const u = await User.findOne({ telegramId: ctx.from.id.toString() });
-    ctx.answerCbQuery();
-    ctx.reply(`Balance: ${u?.balance || 0} Birr`);
-});
-
-bot.launch().then(() => console.log("🤖 Bot Live"));
-
-// --- STATIC SERVING ---
+// --- SERVE ---
 const publicPath = path.resolve(__dirname, 'public');
 app.use(express.static(publicPath));
 app.get('*', (req, res) => {
     if (req.path.includes('.') && !req.path.endsWith('.html')) return res.status(404).end();
     res.sendFile(path.join(publicPath, 'index.html'));
 });
-
-server.listen(PORT, '0.0.0.0', () => console.log(`🚀 Live on ${PORT}`));
+server.listen(PORT, '0.0.0.0', () => console.log(`Live on ${PORT}`));
