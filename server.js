@@ -1,4 +1,3 @@
-  
 require('dotenv').config();
 const { Telegraf, Markup, session } = require('telegraf');
 const express = require('express');
@@ -55,13 +54,13 @@ function generateServerCard(id) {
     }
     let card = [];
     for(let r=0; r<5; r++) card.push([columns[0][r], columns[1][r], columns[2][r], columns[3][r], columns[4][r]]);
-    card[2][2] = 0; // Middle space ID
+    card[2][2] = 0; // Middle space logic ID
     return card;
 }
 
 function checkServerWin(card, drawnNumbers) {
     const drawn = new Set(drawnNumbers);
-    drawn.add(0); // The Star is always counted as a hit
+    drawn.add(0); // Star is always drawn
     for (let i = 0; i < 5; i++) {
         if (card[i].every(n => drawn.has(n))) return true;
         if ([0,1,2,3,4].map(r => card[r][i]).every(n => drawn.has(n))) return true;
@@ -183,4 +182,4 @@ app.get('*', (req, res) => {
     if (req.path.includes('.') && !req.path.endsWith('.html')) return res.status(404).end();
     res.sendFile(path.join(publicPath, 'index.html'));
 });
-server.listen(PORT, '0.0.0.0', () => console.log(`🚀 Server Live`));
+server.listen(PORT, '0.0.0.0', () => console.log(`🚀 Live on ${PORT}`));
