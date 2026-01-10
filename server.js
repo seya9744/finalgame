@@ -14,53 +14,11 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
-// 1. MIDDLEWARE - This must be at the top to read the phone's data
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// --- 2. THE UNIVERSAL SMS API (WORKS WITH ANY APP) ---
-
-// This handles both GET and POST requests
-app.all('/api/incoming-sms', async (req, res) => {
-    // We check every possible place the app might hide the text
-    const incomingText = 
-        req.body.message || req.query.message || 
-        req.body.text || req.query.text || 
-        req.body.msg || req.query.msg || 
-        req.body.content || "";
-
-    console.log("📡 SMS RECEIVED!");
-    console.log("Text found:", incomingText);
-
-    if (!incomingText) {
-        // If you see this in Render logs, the app uses a label we didn't list
-        console.log("Empty request body:", req.body);
-        return res.status(200).send("No text found");
-    }
-
-    const data = parseBankSMS(incomingText);
-    if (data) {
-        try {
-            await VerifiedSMS.create({
-                refNumber: data.ref,
-                amount: data.amount,
-                fullText: incomingText
-            });
-            console.log(`✅ Stored Ref: ${data.ref}`);
-        } catch (e) {
-            console.log("⚠️ SMS already existed in database.");
-        }
-    }
-    
-    // Always send 200 OK so the phone app thinks it was successful
-    res.status(200).send("OK");
-});
-
-// Cron-job ping route
-app.get('/ping', (req, res) => res.status(200).send("Awake"));
-
-// --- 3. DATABASE MODELS ---
+// --- 1. DATABASE ---
 mongoose.connect(MONGODB_URI).then(() => console.log("✅ DB Connected"));
 
 const User = mongoose.model('User', new mongoose.Schema({
@@ -79,7 +37,20 @@ const VerifiedSMS = mongoose.model('VerifiedSMS', new mongoose.Schema({
     createdAt: { type: Date, default: Date.now, expires: 172800 } 
 }));
 
-// --- 4. PARSER & BINGO LOGIC ---
+// --- 2. SMS API (UNIVERSAL) ---
+app.all('/api/incoming-sms', async (req, res) => {
+    const incomingText = req.body.text || req.body.message || req.query.text || "";
+    const data = parseBankSMS(incomingText);
+    if (data) {
+        try {
+            await VerifiedSMS.create({ refNumber: data.ref, amount: data.amount, fullText: incomingText });
+        } catch (e) {}
+    }
+    res.status(200).send("OK");
+});
+app.get('/ping', (req, res) => res.status(200).send("Awake"));
+
+// --- 3. BINGO LOGIC ---
 function parseBankSMS(text) {
     if (!text) return null;
     const refMatch = text.match(/[A-Z0-9]{10,12}/);
@@ -113,7 +84,7 @@ function checkServerWin(card, drawnNumbers) {
     return false;
 }
 
-// --- 5. GAME STATE & LOOP ---
+// --- 4. GAME STATE & LOOP (40s / 2.5s / 7s) ---
 let gameState = { phase: 'SELECTION', phaseEndTime: Date.now() + 40000, timer: 40, drawnNumbers: [], pot: 0, winner: null, totalPlayers: 0, takenCards: [] };
 let players = {}; let socketToUser = {};
 
@@ -131,7 +102,8 @@ setInterval(async () => {
                 gameState.phase = 'GAMEPLAY';
                 for (let tid in players) {
                     if (players[tid].cards?.length > 0) {
-                        const u = await User.findOneAndUpdate({ telegramId: tid }, { $inc: { balance: -(players[tid].cards.length * 10) } }, { new: true });
+                        const cost = players[tid].cards.length * 10;
+                        const u = await User.findOneAndUpdate({ telegramId: tid }, { $inc: { balance: -cost } }, { new: true });
                         if(u) io.to(tid).emit('balance_update', u.balance);
                     }
                 }
@@ -153,7 +125,7 @@ setInterval(() => {
     }
 }, 2500);
 
-// --- 6. SOCKETS ---
+// --- 5. SOCKETS ---
 io.on('connection', (socket) => {
     socket.on('register_user', async (data) => {
         try {
@@ -192,14 +164,14 @@ io.on('connection', (socket) => {
     });
 });
 
-// --- 7. BOT MENU ---
+// --- 6. BOT MENU & REPAIRED INSTRUCTIONS ---
 const bot = new Telegraf(BOT_TOKEN);
 bot.use(session());
 
 const mainKeyboard = () => Markup.inlineKeyboard([
     [Markup.button.webApp("Play 🎮", MINI_APP_URL), Markup.button.callback("Register 📝", "reg_prompt")],
     [Markup.button.callback("Check Balance 💵", "bal"), Markup.button.callback("Deposit 💰", "dep")],
-    [Markup.button.callback("Contact Support...", "support"), Markup.button.callback("Instruction 📖", "rules")],
+    [Markup.button.callback("Contact Support...", "support"), Markup.button.callback("Instruction 📖", "instructions_trigger")],
     [Markup.button.callback("Transfer 🎁", "transfer"), Markup.button.callback("Withdraw 🤑", "withdraw")],
     [Markup.button.callback("Invite 🔗", "invite")]
 ]);
@@ -209,8 +181,29 @@ const supportHeader = `የሚያጋጥማቹ የክፍያ ችግር: \n @sya9744
 
 bot.start(async (ctx) => {
     const user = await User.findOneAndUpdate({ telegramId: ctx.from.id.toString() }, { username: ctx.from.first_name }, { upsert: true, new: true });
-    if (!user.isRegistered) await ctx.reply("Welcome!", contactKey);
+    if (!user.isRegistered) await ctx.reply("Welcome! Click 'Share contact' to register.", contactKey);
     await ctx.reply(`👋 Welcome to Dil Bingo! Choose an Option below.`, mainKeyboard());
+});
+
+// FIXED INSTRUCTIONS HANDLER
+bot.action('instructions_trigger', (ctx) => {
+    ctx.answerCbQuery();
+    const instructionText = `📘 የቢንጎ ጨዋታ ህጎች\n\n` +
+    `🃏 መጫወቻ ካርድ\n` +
+    `1. ጨዋታውን ለመጀመር ከሚመጣልን ከ1-300 የመጫወቻ ካርድ ውስጥ አንዱን እንመርጣለን።\n` +
+    `2. የመጫወቻ ካርዱ ላይ በቀይ ቀለም የተመረጡ ቁጥሮች የሚያሳዩት መጫወቻ ካርድ በሌላ ተጫዋች መመረጡን ነው።\n` +
+    `3. የመጫወቻ ካርድ ስንነካው ከታች በኩል ካርድ ቁጥሩ የሚይዘዉን መጫወቻ ካርድ ያሳየናል።\n` +
+    `4. ወደ ጨዋታው ለመግባት የምንፈልገዉን ካርድ ከመረጥን ለምዝገባ የተሰጠው ሰኮንድ ዜሮ ሲሆን ቀጥታ ወደ ጨዋታ ያስገባናል።\n\n` +
+    `🎮 ጨዋታ\n` +
+    `1. ወደ ጨዋታው ስንገባ በመረጥነው የካርድ ቁጥር መሰረት የመጫወቻ ካርድ እናገኛለን።\n` +
+    `2. ጨዋታው ሲጀምር የተለያዪ ቁጥሮች ከ1 እስከ 75 መጥራት ይጀምራል።\n` +
+    `3. የሚጠራው ቁጥር የኛ መጫወቻ ካርድ ውስጥ ካለ የተጠራውን ቁጥር ክሊክ በማረግ መምረጥ እንችላለን።\n` +
+    `4. የመረጥነውን ቁጥር ማጥፋት ከፈለግን መልሰን እራሱን ቁጥር ክሊክ በማረግ ማጥፋት እንችላለን።\n\n` +
+    `🏆 አሸናፊ\n` +
+    `1. ቁጥሮቹ ሲጠሩ ከመጫወቻ ካርዳችን ላይ እየመረጥን ወደጎን ወይም ወደታች ወይም ወደሁለቱም አግዳሚ ወይም አራቱን ማእዘናት ከመረጥን ወዲያውኑ ከታች በኩል bingo የሚለውን በመንካት ማሸነፍ እንችላለን።\n` +
+    `2. ወደጎን ወይም ወደታች ወይም ወደሁለቱም አግዳሚ ወይም አራቱን ማእዘናት ሳይጠሩ bingo የሚለውን ክሊክ ካደረግን ከጨዋታው እንታገዳለን።\n` +
+    `3. ሁለት ወይም ከዚያ በላይ ተጫዋቾች እኩል ቢያሸንፉ ደራሹ ለቁጥራቸው ይካፈላል።`;
+    ctx.reply(instructionText);
 });
 
 bot.action('dep', (ctx) => {
@@ -234,7 +227,7 @@ bot.on('text', async (ctx) => {
         if (smsRecord) {
             smsRecord.isUsed = true; await smsRecord.save();
             const u = await User.findOneAndUpdate({ telegramId: ctx.from.id.toString() }, { $inc: { balance: smsRecord.amount } }, { new: true });
-            io.to(u.telegramId).emit('balance_update', u.balance);
+            io.to(ctx.from.id.toString()).emit('balance_update', u.balance);
             return ctx.reply(`✅ ተረጋግጧል! ${smsRecord.amount} ብር ተጨምሯል።`);
         } else { return ctx.reply("❌ የደረሰኝ ቁጥሩ አልተገኘም ወይም ጥቅም ላይ ውሏል።"); }
     }
@@ -244,11 +237,13 @@ bot.action('pay_tele', (ctx) => ctx.reply(`${supportHeader}\n\n1. ወደ 0922573
 bot.action('pay_cbe', (ctx) => ctx.reply(`${supportHeader}\n\n1. ወደ 1000102526418 (SEID) ${ctx.session.amount || 10} ብር ያስገቡ\n\n2. የደረሰኙን መልዕክት Past ያድርጉ 👇`));
 bot.action('pay_aby', (ctx) => ctx.reply(`${supportHeader}\n\n1. ወደ 88472845 (Acc) ${ctx.session.amount || 10} ብር ያስገቡ\n\n2. የደረሰኙን መልዕክት Past ያድርጉ 👇`));
 bot.action('pay_cbebirr', (ctx) => ctx.reply(`${supportHeader}\n\n1. ወደ 0922573939 (CBE BIRR) ${ctx.session.amount || 10} ብር ይላኩ\n\n2. የደረሰኙን መልዕክት Past ያድርጉ 👇`));
+
 bot.on('contact', async (ctx) => { await User.findOneAndUpdate({ telegramId: ctx.from.id.toString() }, { phoneNumber: ctx.message.contact.phone_number, isRegistered: true }); ctx.reply("✅ ተመዝግበዋል!", mainKeyboard()); });
 bot.action('bal', async (ctx) => { const u = await User.findOne({ telegramId: ctx.from.id.toString() }); ctx.reply(`💰 Balance: ${u?.balance || 0} Birr`); });
+bot.action('support', (ctx) => ctx.reply("🛠 Support: @sya9744"));
+bot.action('invite', (ctx) => ctx.reply(`🔗 Link: https://t.me/${ctx.botInfo.username}?start=${ctx.from.id}`));
 bot.launch();
 
-// --- 8. SERVE FRONTEND (This must be LAST) ---
 const publicPath = path.resolve(__dirname, 'public');
 app.use(express.static(publicPath));
 app.get('*', (req, res) => {
