@@ -8,6 +8,7 @@ const mongoose = require('mongoose');
 const path = require('path');
 const fs = require('fs');
 
+// --- CONFIG ---
 const { BOT_TOKEN, MONGODB_URI, PORT = 3001, MINI_APP_URL } = process.env;
 const app = express();
 const server = http.createServer(app);
@@ -17,7 +18,7 @@ app.use(cors());
 app.use(express.json());
 
 // --- 1. DATABASE ---
-mongoose.connect(MONGODB_URI).then(() => console.log("✅ MongoDB Connected"));
+mongoose.connect(MONGODB_URI).then(() => console.log("✅ DB Connected"));
 
 const User = mongoose.model('User', new mongoose.Schema({
     telegramId: { type: String, unique: true },
@@ -33,7 +34,7 @@ const VerifiedSMS = mongoose.model('VerifiedSMS', new mongoose.Schema({
     isUsed: { type: Boolean, default: false }
 }));
 
-// --- 2. BINGO LOGIC ---
+// --- 2. BINGO ENGINE ---
 function generateServerCard(id) {
     const seed = parseInt(id) || 1;
     const rng = (s) => {
@@ -56,7 +57,7 @@ function generateServerCard(id) {
     }
     let card = [];
     for(let r=0; r<5; r++) card.push([columns[0][r], columns[1][r], columns[2][r], columns[3][r], columns[4][r]]);
-    card[2][2] = 0; 
+    card[2][2] = 0; // Star
     return card;
 }
 
@@ -72,7 +73,7 @@ function checkServerWin(card, drawnNumbers) {
     return false;
 }
 
-// --- 3. GAME STATE & LOOP ---
+// --- 3. GAME STATE & MAIN LOOP ---
 let gameState = { phase: 'SELECTION', phaseEndTime: Date.now() + 40000, timer: 40, drawnNumbers: [], pot: 0, winner: null, totalPlayers: 0, takenCards: [] };
 let players = {}; 
 let socketToUser = {};
@@ -88,6 +89,7 @@ setInterval(async () => {
         Object.values(players).forEach(p => { if (p.cards) totalCards += p.cards.length; });
         gameState.totalPlayers = totalCards;
         gameState.pot = totalCards * 10;
+
         if (timeLeft <= 0) {
             if (totalCards >= 2) {
                 gameState.phase = 'GAMEPLAY';
@@ -98,7 +100,9 @@ setInterval(async () => {
                         if(u) io.to(tid).emit('balance_update', u.balance);
                     }
                 }
-            } else { gameState.phaseEndTime = Date.now() + 40000; }
+            } else {
+                gameState.phaseEndTime = Date.now() + 40000;
+            }
         }
     }
 
@@ -110,6 +114,7 @@ setInterval(async () => {
     io.emit('game_tick', gameState);
 }, 1000);
 
+// Ball Drawing Loop (Fast 2.5s)
 setInterval(() => {
     if (gameState.phase === 'GAMEPLAY' && !gameState.winner && gameState.drawnNumbers.length < 75) {
         let n;
@@ -119,7 +124,7 @@ setInterval(() => {
     }
 }, 2500);
 
-// --- 4. SOCKETS ---
+// --- 4. SOCKET.IO ---
 io.on('connection', (socket) => {
     socket.on('register_user', async (data) => {
         try {
@@ -164,7 +169,7 @@ io.on('connection', (socket) => {
     });
 });
 
-// --- 5. BOT MENU & DEPOSIT LOGIC ---
+// --- 5. BOT MENU & PAYMENTS ---
 const bot = new Telegraf(BOT_TOKEN);
 bot.use(session());
 
@@ -177,6 +182,7 @@ const mainKeyboard = () => Markup.inlineKeyboard([
 ]);
 
 const contactKey = Markup.keyboard([[Markup.button.contactRequest("📞 Share contact")]]).resize().oneTime();
+const supportHeader = `የሚያጋጥማቹ የክፍያ ችግር: \n @sya9744\n@Komodo27 ላይ ፃፉልን።`;
 
 bot.start(async (ctx) => {
     const user = await User.findOneAndUpdate({ telegramId: ctx.from.id.toString() }, { username: ctx.from.first_name }, { upsert: true, new: true });
@@ -186,63 +192,56 @@ bot.start(async (ctx) => {
 
 bot.on('contact', async (ctx) => {
     await User.findOneAndUpdate({ telegramId: ctx.from.id.toString() }, { phoneNumber: ctx.message.contact.phone_number, isRegistered: true });
-    await ctx.reply("✅ Registration Successful!", Markup.removeKeyboard());
+    await ctx.reply("✅ ተመዝግበዋል!", Markup.removeKeyboard());
     await ctx.reply("Main Menu:", mainKeyboard());
 });
 
-// FIXED DEPOSIT ACTION
 bot.action('dep', (ctx) => {
     ctx.answerCbQuery();
     ctx.session = ctx.session || {};
-    ctx.session.state = 'WAITING_FOR_AMOUNT';
+    ctx.session.state = 'WAIT_AMT';
     ctx.reply("ማስገባት የፈለጉትን የብር መጠን ከ 10 ብር ጀምሮ ያስገቡ።");
 });
 
-// TEXT HANDLER FOR DEPOSIT AND SMS CODES
 bot.on('text', async (ctx) => {
     const text = ctx.message.text;
-
-    // 1. Check if user is typing an amount for deposit
-    if (ctx.session?.state === 'WAITING_FOR_AMOUNT') {
+    if (ctx.session?.state === 'WAIT_AMT') {
         const amount = parseInt(text);
-        if (isNaN(amount) || amount < 10) {
-            return ctx.reply("እባክዎን ከ 10 ብር በላይ ትክክለኛ የቁጥር መጠን ያስገቡ።");
-        }
-        
+        if (isNaN(amount) || amount < 10) return ctx.reply("እባክዎን ከ 10 ብር በላይ ያስገቡ።");
         ctx.session.amount = amount;
-        ctx.session.state = null; // Reset state
-
+        ctx.session.state = null;
         return ctx.reply(`የመረጡት መጠን: ${amount} ብር\nእባክዎ የክፍያ ዘዴ ይምረጡ:`, Markup.inlineKeyboard([
-            [Markup.button.callback("TELEBIRR", "pay_tele"), Markup.button.callback("CBE", "pay_cbe")],
+            [Markup.button.callback("TELEBIRR", "pay_tele"), Markup.button.callback("COMMERCIAL BANK", "pay_cbe")],
             [Markup.button.callback("ABYSSINIA", "pay_aby"), Markup.button.callback("CBE BIRR", "pay_cbebirr")]
         ]));
     }
-
-    // 2. Check for SMS reference codes
     const refMatch = text.match(/[A-Z0-9]{10,12}/);
     if (refMatch) {
         const sms = await VerifiedSMS.findOne({ refNumber: refMatch[0], isUsed: false });
         if (sms) {
             sms.isUsed = true; await sms.save();
             const u = await User.findOneAndUpdate({ telegramId: ctx.from.id.toString() }, { $inc: { balance: sms.amount } }, { new: true });
-            io.to(ctx.from.id.toString()).emit('balance_update', u.balance);
-            ctx.reply(`✅ Added ${sms.amount} Birr!`);
+            io.to(u.telegramId).emit('balance_update', u.balance);
+            ctx.reply(`✅ ${sms.amount} ብር ወደ አካውንቶ ተጨምሯል!`);
         }
     }
 });
 
-// Payment Method Callbacks
-bot.action('pay_tele', (ctx) => ctx.reply(`TELEBIRR: እባክዎ ${ctx.session.amount || 10} ብር ወደ 09xxxxxxxx ይላኩ እና የደረሰኝ ቁጥሩን እዚህ ይላኩ።`));
-bot.action('pay_cbe', (ctx) => ctx.reply(`CBE: እባክዎ ${ctx.session.amount || 10} ብር ወደ 1000xxxxxxx ይላኩ እና የደረሰኝ ቁጥሩን እዚህ ይላኩ።`));
-bot.action('pay_aby', (ctx) => ctx.reply(`ABYSSINIA: እባክዎ ${ctx.session.amount || 10} ብር ወደ xxxxxxxx ይላኩ እና የደረሰኝ ቁጥሩን እዚህ ይላኩ።`));
-bot.action('pay_cbebirr', (ctx) => ctx.reply(`CBE BIRR: እባክዎ ${ctx.session.amount || 10} ብር ወደ 09xxxxxxxx ይላኩ እና የደረሰኝ ቁጥሩን እዚህ ይላኩ።`));
-
+bot.action('pay_tele', (ctx) => ctx.reply(`${supportHeader}\n\n1. ከታች ባለው የቴሌብር አካውንት ${ctx.session.amount || 10} ብር ያስገቡ\n     Phone: 0922573939\n    Name: SEID\n\n2. የከፈሉበትን አጭር የጹሁፍ መልዕክት copy Past ያድርጉ 👇`));
+bot.action('pay_cbe', (ctx) => ctx.reply(`${supportHeader}\n\n1. ከታች ባለው የንግድ ባንክ አካውንት ${ctx.session.amount || 10} ብር ያስገቡ\n     Acc: 1000102526418\n    Name: SEID\n\n2. የከፈሉበትን አጭር የጹሁፍ መልዕክት copy Past ያድርጉ 👇`));
+bot.action('pay_aby', (ctx) => ctx.reply(`${supportHeader}\n\n1. ከታች ባለው የአቢሲንያ ባንክ አካውንት ${ctx.session.amount || 10} ብር ያስገቡ\n     Acc: 88472845\n    Name: SEID\n\n2. የከፈሉበትን አጭር የጹሁፍ መልዕክት copy Past ያድርጉ 👇`));
+bot.action('pay_cbebirr', (ctx) => ctx.reply(`${supportHeader}\n\n1. ከታች ባለው የCBE BIRR አካውንት ${ctx.session.amount || 10} ብር ያስገቡ\n     Phone: 0922573939\n    Name: SEID\n\n2. የከፈሉበትን አጭር የጹሁፍ መልዕክት copy Past ያድርጉ 👇`));
 bot.action('bal', async (ctx) => {
     const u = await User.findOne({ telegramId: ctx.from.id.toString() });
     ctx.reply(`💰 Balance: ${u?.balance || 0} Birr`);
 });
+bot.action('support', (ctx) => ctx.reply("🛠 Contact @sya9744 for support."));
+bot.action('rules', (ctx) => ctx.reply("📖 Match 5 in a row to win 80% of the pot!"));
+bot.action('transfer', (ctx) => ctx.reply("🎁 Transfer coming soon."));
+bot.action('withdraw', (ctx) => ctx.reply("🤑 DM @sya9744 for withdrawal."));
+bot.action('invite', (ctx) => ctx.reply(`🔗 Invite Link: https://t.me/${ctx.botInfo.username}?start=${ctx.from.id}`));
 
-bot.launch();
+bot.launch().then(() => console.log("🤖 Bot Live"));
 
 // --- 6. SERVE ---
 const publicPath = path.resolve(__dirname, 'public');
