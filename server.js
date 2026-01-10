@@ -131,11 +131,6 @@ io.on('connection', (socket) => {
             socket.join(tid); socketToUser[socket.id] = tid;
             const u = await User.findOne({ telegramId: tid });
             if (u) {
-                // NEW CONCEPT: If user is not registered, do not send game data
-                if (!u.isRegistered) {
-                    return socket.emit('error_message', "እባክዎ መጀመሪያ በBot ውስጥ ስልክዎን ያጋሩ (Register)!");
-                }
-
                 socket.emit('user_data', { balance: u.balance, phoneNumber: u.phoneNumber });
                 if (!players[tid]) players[tid] = { cards: [], username: u.username };
                 if (players[tid].cards.length > 0) socket.emit('restore_cards', players[tid].cards);
@@ -171,7 +166,7 @@ io.on('connection', (socket) => {
 const bot = new Telegraf(BOT_TOKEN);
 bot.use(session());
 
-// Menu Command List
+// --- THE NEW MENU LIST SETTING ---
 bot.telegram.setMyCommands([
     { command: 'start', description: 'Start' },
     { command: 'register', description: 'Register' },
@@ -187,20 +182,13 @@ bot.telegram.setMyCommands([
 ]);
 bot.telegram.setChatMenuButton({ menuButton: { type: 'default' } });
 
-// NEW CONCEPT: Dynamic Keyboard (Only shows Play if registered)
-const mainKeyboard = (isRegistered) => {
-    const rows = [];
-    if (isRegistered) {
-        rows.push([Markup.button.webApp("Play 🎮", MINI_APP_URL), Markup.button.callback("Register 📝", "reg_prompt")]);
-    } else {
-        rows.push([Markup.button.callback("Register 📝", "reg_prompt")]);
-    }
-    rows.push([Markup.button.callback("Check Balance 💵", "bal"), Markup.button.callback("Deposit 💰", "dep")]);
-    rows.push([Markup.button.callback("Contact Support...", "support_trigger"), Markup.button.callback("Instruction 📖", "instructions_trigger")]);
-    rows.push([Markup.button.callback("Transfer 🎁", "transfer"), Markup.button.callback("Withdraw 🤑", "withdraw_start")]);
-    rows.push([Markup.button.callback("Invite 🔗", "invite")]);
-    return Markup.inlineKeyboard(rows);
-};
+const mainKeyboard = () => Markup.inlineKeyboard([
+    [Markup.button.webApp("Play 🎮", MINI_APP_URL), Markup.button.callback("Register 📝", "reg_prompt")],
+    [Markup.button.callback("Check Balance 💵", "bal"), Markup.button.callback("Deposit 💰", "dep")],
+    [Markup.button.callback("Contact Support...", "support_trigger"), Markup.button.callback("Instruction 📖", "instructions_trigger")],
+    [Markup.button.callback("Transfer 🎁", "transfer"), Markup.button.callback("Withdraw 🤑", "withdraw_start")],
+    [Markup.button.callback("Invite 🔗", "invite")]
+]);
 
 const withdrawMethods = Markup.inlineKeyboard([
     [Markup.button.callback("Telebirr", "w_meth_Telebirr")],
@@ -213,38 +201,14 @@ const withdrawMethods = Markup.inlineKeyboard([
 const contactKey = Markup.keyboard([[Markup.button.contactRequest("📞 Share contact")]]).resize().oneTime();
 const supportHeader = `የሚያጋጥማቹ የክፍያ ችግር: \n @sya9744\n@Komodo27 ላይ ፃፉልን።`;
 
+// --- COMMAND HANDLERS FOR THE NEW MENU LIST ---
 bot.start(async (ctx) => {
     const user = await User.findOneAndUpdate({ telegramId: ctx.from.id.toString() }, { username: ctx.from.first_name }, { upsert: true, new: true });
-    if (!user.isRegistered) await ctx.reply("👋 Welcome! Please share your contact to earn 10 Birr Bonus and unlock the game.", contactKey);
-    await ctx.reply(`👋 Welcome to Dil Bingo! Choose an Option below.`, mainKeyboard(user.isRegistered));
+    if (!user.isRegistered) await ctx.reply("👋 Welcome! Click 'Share contact' to register.", contactKey);
+    await ctx.reply(`👋 Welcome to Dil Bingo! Choose an Option below.`, mainKeyboard());
 });
-
-// NEW CONCEPT: 10 Birr Bonus on first registration
-bot.on('contact', async (ctx) => {
-    const existing = await User.findOne({ telegramId: ctx.from.id.toString() });
-    let bonusText = "";
-    
-    if (existing && !existing.isRegistered) {
-        await User.findOneAndUpdate({ telegramId: ctx.from.id.toString() }, { 
-            phoneNumber: ctx.message.contact.phone_number, 
-            isRegistered: true,
-            $inc: { balance: 10 } // Bonus
-        });
-        bonusText = "\n🎁 ለእርሶ የ 10 ብር የጅማሮ ቦነስ በWalletዎ ላይ ተጨምሯል!";
-    } else {
-        await User.findOneAndUpdate({ telegramId: ctx.from.id.toString() }, { phoneNumber: ctx.message.contact.phone_number, isRegistered: true });
-    }
-    
-    ctx.reply(`✅ ተመዝግበዋል! አሁን መጫወት ይችላሉ።${bonusText}`, mainKeyboard(true));
-});
-
-// --- COMMAND HANDLERS & BUTTON ACTIONS ---
 bot.command('register', (ctx) => ctx.reply("እባክዎ ለመመዝገብ ከታች ያለውን 'Share contact' የሚለውን ይጫኑ::", contactKey));
-bot.command('play', async (ctx) => {
-    const u = await User.findOne({ telegramId: ctx.from.id.toString() });
-    if (!u.isRegistered) return ctx.reply("መጀመሪያ መመዝገብ አለብዎት!", contactKey);
-    ctx.reply("መጫወት ለመጀመር Play የሚለውን ይጫኑ:", Markup.inlineKeyboard([[Markup.button.webApp("Play 🎮", MINI_APP_URL)]]));
-});
+bot.command('play', (ctx) => ctx.reply("መጫወት ለመጀመር Play የሚለውን ይጫኑ:", Markup.inlineKeyboard([[Markup.button.webApp("Play 🎮", MINI_APP_URL)]])));
 bot.command('deposit', (ctx) => { ctx.session = { state: 'WAIT_AMT' }; ctx.reply("ማስገባት የፈለጉትን የብር መጠን ከ 10 ብር ጀምሮ ያስገቡ።"); });
 bot.command('balance', async (ctx) => { const u = await User.findOne({ telegramId: ctx.from.id.toString() }); ctx.reply(`💰 Balance: ${u?.balance || 0} Birr`); });
 bot.command('withdraw', async (ctx) => {
@@ -252,14 +216,17 @@ bot.command('withdraw', async (ctx) => {
     if (!u || u.balance < 50) return ctx.reply("ዝቅተኛ ማውጣት የሚቻለውየገንዘብ መጠን 50 ብር ነው ።");
     ctx.session = { state: 'WAIT_W_AMT' }; ctx.reply("💰 ማውጣት የሚፈልጉትን የገንዘብ መጠን ያስገቡ ?");
 });
+bot.command('instruction', (ctx) => sendBeautifiedRules(ctx));
 bot.command('support', (ctx) => ctx.reply(`🛠 Support:\n👉 @sya9744\n👉 @komodo27`));
+bot.command('transfer', (ctx) => ctx.reply("🎁 Transfer feature coming soon."));
 
+// --- BUTTON ACTIONS ---
 bot.action('support_trigger', (ctx) => { ctx.answerCbQuery(); ctx.reply(`🛠 Support:\n\nIf you need help, contact us here:\n👉 @sya9744\n👉 @komodo27`); });
 const sendBeautifiedRules = (ctx) => {
     const htmlText = `<b>📘 የቢንጎ ጨዋታ ህጎች</b>\n\n` +
-    `<blockquote><b>🃏 መጫወቻ ካርድ</b>\n\n1. ከ1-300 ካርድ አንዱን እንመርጣለን።\n\n2. ቀይ ቀለም የሚያሳዩት በሌላ ተጫዋች መመረጡን ነው።\n\n3. የመጫወቻ ካርድ ስንነካው Preview ያሳየናል።\n\n4. ምዝገባ ሲያልቅ ወደ ጨዋታ ያስገባናል።</blockquote>\n\n` +
-    `<blockquote><b>🎮 ጨዋታ</b>\n\n1. ቁጥሮች ከ1 እስከ 75 መጥራት ይጀምራል።\n\n2. ካርዶ ላይ ካለ ክሊክ በማረግ ይምረጡ።</blockquote>\n\n` +
-    `<blockquote><b>🏆 አሸናፊ</b>\n\n1. መስመር ሲሞሉ <b>bingo</b> የሚለውን ይንኩ።\n\n2. ተሳስተው ቢጫኑ ከጨዋታ ይታገዳሉ::</blockquote>`;
+    `<blockquote><b>🃏 መጫወቻ ካርድ</b>\n\n1. ጨዋታውን ለመጀመር ከሚመጣልን ከ1-300 የመጫወቻ ካርድ ውስጥ አንዱን እንመርጣለን።\n\n2. የመጫወቻ ካርዱ ላይ በቀይ ቀለም የተመረጡ ቁጥሮች የሚያሳዩት መጫወቻ ካርድ በሌላ ተጫዋች መመረጡን ነው።\n\n3. የመጫወቻ ካርድ ስንነካው ከታች በኩል ካርድ ቁጥሩ የሚይዘዉን መጫወቻ ካርድ ያሳየናል።\n\n4. ወደ ጨዋታው ለመግባት የምንፈልገዉን ካርድ ከመረጥን ለምዝገባ የተሰጠው ሰኮንድ ዜሮ ሲሆን ቀጥታ ወደ ጨዋታ ያስገባናል።</blockquote>\n\n` +
+    `<blockquote><b>🎮 ጨዋታ</b>\n\n1. ወደ ጨዋታው ስንገባ በመረጥነው የካርድ ቁጥር መሰረት የመጫወቻ ካርድ እናገኛለን።\n\n2. ጨዋታው ሲጀምር የተለያዪ ቁጥሮች ከ1 እስከ 75 መጥራት ይጀምራል።\n\n3. የሚጠራው ቁጥር የኛ መጫወቻ ካርድ ውስጥ ካለ የተጠራውን ቁጥር ክሊክ በማረግ መምረጥ እንችላለን።\n\n4. የመረጥነውን ቁጥር ማጥፋት ከፈለግን መልሰን እራሱን ቁጥር ክሊክ በማረግ ማጥፋት እንችላለን።</blockquote>\n\n` +
+    `<blockquote><b>🏆 አሸናፊ</b>\n\n1. ቁጥሮቹ ሲጠሩ ከመጫወቻ ካርዳችን ላይ እየመረጥን ወደጎን ወይም ወደታች ወይም ወደሁለቱም አግዳሚ ወይም አራቱን ማእዘናት ከመረጥን ወዲያውኑ ከታች በኩል <b>bingo</b> የሚለውን በመንካት ማሸነፍ እንችላለን።\n\n2. ወደጎን ወይም ወደታች ወይም ወደሁለቱም አግዳሚ ወይም አራቱን ማእዘናት ሳይጠሩ <b>bingo</b> የሚለውን ክሊክ ካደረግን ከጨዋታው እንታገዳለን።\n\n3. ሁለት ወይም ከዚያ በላይ ተጫዋቾች እኩል ቢያሸንፉ ደራሹ ለቁጥራቸው ይካፈላል።</blockquote>`;
     return ctx.replyWithHTML(htmlText);
 };
 bot.action('instructions_trigger', (ctx) => { ctx.answerCbQuery(); sendBeautifiedRules(ctx); });
@@ -312,6 +279,7 @@ bot.on('text', async (ctx) => {
     }
 });
 
+bot.on('contact', async (ctx) => { await User.findOneAndUpdate({ telegramId: ctx.from.id.toString() }, { phoneNumber: ctx.message.contact.phone_number, isRegistered: true }); ctx.reply("✅ ተመዝግበዋል!", mainKeyboard()); });
 bot.action('pay_tele', (ctx) => ctx.reply(`${supportHeader}\n\n1. ወደ 0922573939 (SEID) ${ctx.session.amount || 10} ብር ይላኩ\n\n2. የደረሰኙን መልዕክት Past ያድርጉ 👇`));
 bot.action('pay_cbe', (ctx) => ctx.reply(`${supportHeader}\n\n1. ወደ 1000102526418 (Acc) ${ctx.session.amount || 10} ብር ያስገቡ\n\n2. የደረሰኙን መልዕክት Past ያድርጉ 👇`));
 bot.action('pay_aby', (ctx) => ctx.reply(`${supportHeader}\n\n1. ወደ 88472845 (Acc) ${ctx.session.amount || 10} ብር ያስገቡ\n\n2. የደረሰኙን መልዕክት Past ያድርጉ 👇`));
