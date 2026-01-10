@@ -9,7 +9,6 @@ const path = require('path');
 const fs = require('fs');
 
 // --- CONFIG ---
-// Render often prefers PORT 10000
 const { BOT_TOKEN, MONGODB_URI, PORT = 10000, MINI_APP_URL } = process.env;
 const app = express();
 const server = http.createServer(app);
@@ -20,8 +19,8 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// --- 1. DATABASE MODELS ---
-mongoose.connect(MONGODB_URI).then(() => console.log("✅ DB Connected"));
+// --- 1. DATABASE MODELS (THE MOST IMPORTANT PART) ---
+mongoose.connect(MONGODB_URI).then(() => console.log("✅ MongoDB Connected"));
 
 const User = mongoose.model('User', new mongoose.Schema({
     telegramId: { type: String, unique: true },
@@ -39,7 +38,7 @@ const VerifiedSMS = mongoose.model('VerifiedSMS', new mongoose.Schema({
     createdAt: { type: Date, default: Date.now, expires: 172800 } 
 }));
 
-// --- 2. IMPROVED SMS PARSER (CBE / Telebirr) ---
+// --- 2. SMS PARSER (CBE / Telebirr) ---
 function parseBankSMS(text) {
     if (!text) return null;
     // Matches 10-12 character alphanumeric Reference IDs
@@ -54,36 +53,38 @@ function parseBankSMS(text) {
 }
 
 // --- 3. ZEROGIC WEBHOOK RECEIVER ---
+// Setup your Zerogic app to POST to: https://your-app.onrender.com/api/incoming-sms
 app.post('/api/incoming-sms', async (req, res) => {
-    // Zerogic usually sends data in 'message' or 'text' fields
-    const incomingText = req.body.message || req.body.text || req.body.msg || "";
+    // Zerogic usually sends: from, text, sent_date
+    const incomingText = req.body.text || req.body.message || "";
     
-    console.log("📡 Zerogic Hit! Data Received:", JSON.stringify(req.body));
+    console.log("📡 Zerogic received message:", incomingText);
 
     const data = parseBankSMS(incomingText);
     if (data) {
         try {
+            // Save to MongoDB so the bot can find it later
             await VerifiedSMS.create({
                 refNumber: data.ref,
                 amount: data.amount,
                 fullText: incomingText
             });
             console.log(`✅ SMS Stored: Ref ${data.ref}, Amount ${data.amount}`);
-            return res.status(200).send("SUCCESS");
+            return res.status(200).send("OK");
         } catch (e) {
             console.log("⚠️ Duplicate SMS ID ignored.");
-            return res.status(200).send("ALREADY_EXISTS");
+            return res.status(200).send("EXISTS");
         }
     }
     
-    console.log("❌ Regex failed. SMS structure not recognized.");
-    res.status(200).send("COULD_NOT_PARSE"); // Always send 200 so the app doesn't keep retrying errors
+    console.log("❌ Could not find Ref/Amount in this SMS.");
+    res.status(200).send("PARSING_FAILED"); 
 });
 
-// Health check for Cron-job.org
-app.get('/ping', (req, res) => res.status(200).send("Server is awake"));
+// Health check for Cron-job.org (Ping this URL every 10 mins)
+app.get('/ping', (req, res) => res.status(200).send("Awake"));
 
-// --- 4. BINGO ENGINE ---
+// --- 4. BINGO ENGINE (Unchanged) ---
 function generateServerCard(id) {
     const seed = parseInt(id) || 1;
     const rng = (s) => {
@@ -233,6 +234,11 @@ bot.start(async (ctx) => {
     await ctx.reply(`👋 Welcome to Dil Bingo! Choose an Option below.`, mainKeyboard());
 });
 
+bot.on('contact', async (ctx) => {
+    await User.findOneAndUpdate({ telegramId: ctx.from.id.toString() }, { phoneNumber: ctx.message.contact.phone_number, isRegistered: true });
+    ctx.reply("✅ ተመዝግበዋል!", mainKeyboard());
+});
+
 bot.action('dep', (ctx) => {
     ctx.answerCbQuery();
     ctx.session = ctx.session || {};
@@ -254,7 +260,7 @@ bot.on('text', async (ctx) => {
         ]));
     }
 
-    // Auto-verify pasted SMS
+    // Auto-verify pasted SMS code from player
     const data = parseBankSMS(text);
     if (data) {
         const smsRecord = await VerifiedSMS.findOne({ refNumber: data.ref, isUsed: false });
@@ -262,23 +268,18 @@ bot.on('text', async (ctx) => {
             smsRecord.isUsed = true; await smsRecord.save();
             const u = await User.findOneAndUpdate({ telegramId: ctx.from.id.toString() }, { $inc: { balance: smsRecord.amount } }, { new: true });
             io.to(ctx.from.id.toString()).emit('balance_update', u.balance);
-            return ctx.reply(`✅ ተረጋግጧል! ${smsRecord.amount} ብር ገብቷል።`);
+            return ctx.reply(`✅ ተረጋግጧል! ${smsRecord.amount} ብር ተጨምሯል።`);
         } else {
             return ctx.reply("❌ የደረሰኝ ቁጥሩ አልተገኘም ወይም ጥቅም ላይ ውሏል።");
         }
     }
 });
 
-// Instructions
+// Instruction Handlers
 bot.action('pay_tele', (ctx) => ctx.reply(`${supportHeader}\n\n1. ወደ 0922573939 (SEID) ${ctx.session.amount || 10} ብር ይላኩ\n\n2. የደረሰኙን መልዕክት Past ያድርጉ 👇`));
 bot.action('pay_cbe', (ctx) => ctx.reply(`${supportHeader}\n\n1. ወደ 1000102526418 (SEID) ${ctx.session.amount || 10} ብር ያስገቡ\n\n2. የደረሰኙን መልዕክት Past ያድርጉ 👇`));
 bot.action('pay_aby', (ctx) => ctx.reply(`${supportHeader}\n\n1. ወደ 88472845 (Acc) ${ctx.session.amount || 10} ብር ያስገቡ\n\n2. የደረሰኙን መልዕክት Past ያድርጉ 👇`));
 bot.action('pay_cbebirr', (ctx) => ctx.reply(`${supportHeader}\n\n1. ወደ 0922573939 (CBE BIRR) ${ctx.session.amount || 10} ብር ይላኩ\n\n2. የደረሰኙን መልዕክት Past ያድርጉ 👇`));
-
-bot.on('contact', async (ctx) => {
-    await User.findOneAndUpdate({ telegramId: ctx.from.id.toString() }, { phoneNumber: ctx.message.contact.phone_number, isRegistered: true });
-    ctx.reply("✅ ተመዝግበዋል!", mainKeyboard());
-});
 
 bot.action('bal', async (ctx) => {
     const u = await User.findOne({ telegramId: ctx.from.id.toString() });
@@ -286,7 +287,7 @@ bot.action('bal', async (ctx) => {
 });
 
 bot.action('support', (ctx) => ctx.reply("🛠 Support: @sya9744"));
-bot.action('rules', (ctx) => ctx.reply("📖 Match 5 in a line to win!"));
+bot.action('rules', (ctx) => ctx.reply("📖 Match 5 in a row to win 80% pot!"));
 bot.action('invite', (ctx) => ctx.reply(`🔗 Link: https://t.me/${ctx.botInfo.username}?start=${ctx.from.id}`));
 
 bot.launch();
