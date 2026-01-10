@@ -9,7 +9,7 @@ const path = require('path');
 const fs = require('fs');
 
 // --- CONFIG ---
-const { BOT_TOKEN, MONGODB_URI, PORT = 10000, MINI_APP_URL, SMS_SECRET = "MY_SECRET_KEY" } = process.env;
+const { BOT_TOKEN, MONGODB_URI, PORT = 10000, MINI_APP_URL, SMS_SECRET = "MY_SECRET_KEY", ADMIN_ID } = process.env;
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
@@ -170,8 +170,17 @@ const mainKeyboard = () => Markup.inlineKeyboard([
     [Markup.button.webApp("Play 🎮", MINI_APP_URL), Markup.button.callback("Register 📝", "reg_prompt")],
     [Markup.button.callback("Check Balance 💵", "bal"), Markup.button.callback("Deposit 💰", "dep")],
     [Markup.button.callback("Contact Support...", "support_trigger"), Markup.button.callback("Instruction 📖", "instructions_trigger")],
-    [Markup.button.callback("Transfer 🎁", "transfer"), Markup.button.callback("Withdraw 🤑", "withdraw")],
+    [Markup.button.callback("Transfer 🎁", "transfer"), Markup.button.callback("Withdraw 🤑", "withdraw_start")],
     [Markup.button.callback("Invite 🔗", "invite")]
+]);
+
+// Withdrawal Methods Keyboard
+const withdrawMethods = Markup.inlineKeyboard([
+    [Markup.button.callback("Telebirr", "w_meth_Telebirr")],
+    [Markup.button.callback("Commercial Bank", "w_meth_CommercialBank")],
+    [Markup.button.callback("Abyssinia Bank", "w_meth_Abyssinia")],
+    [Markup.button.callback("CBE Birr", "w_meth_CBEBirr")],
+    [Markup.button.callback("❌ Cancel", "w_cancel")]
 ]);
 
 const contactKey = Markup.keyboard([[Markup.button.contactRequest("📞 Share contact")]]).resize().oneTime();
@@ -183,7 +192,6 @@ bot.start(async (ctx) => {
     await ctx.reply(`👋 Welcome to Dil Bingo! Choose an Option below.`, mainKeyboard());
 });
 
-// UPDATED SUPPORT HANDLER
 bot.action('support_trigger', (ctx) => {
     ctx.answerCbQuery();
     ctx.reply(`🛠 Support:\n\nIf you need help, contact us here:\n👉 @sya9744\n👉 @komodo27`);
@@ -192,20 +200,9 @@ bot.action('support_trigger', (ctx) => {
 bot.action('instructions_trigger', (ctx) => {
     ctx.answerCbQuery();
     const htmlText = `<b>📘 የቢንጎ ጨዋታ ህጎች</b>\n\n` +
-    `<blockquote><b>🃏 መጫወቻ ካርድ</b>\n\n` +
-    `1. ጨዋታውን ለመጀመር ከሚመጣልን ከ1-300 የመጫወቻ ካርድ ውስጥ አንዱን እንመርጣለን።\n\n` +
-    `2. የመጫወቻ ካርዱ ላይ በቀይ ቀለም የተመረጡ ቁጥሮች የሚያሳዩት መጫወቻ ካርድ በሌላ ተጫዋች መመረጡን ነው።\n\n` +
-    `3. የመጫወቻ ካርድ ስንነካው ከታች በኩል ካርድ ቁጥሩ የሚይዘዉን መጫወቻ ካርድ ያሳየናል።\n\n` +
-    `4. ወደ ጨዋታው ለመግባት የምንፈልገዉን ካርድ ከመረጥን ለምዝገባ የተሰጠው ሰኮንድ ዜሮ ሲሆን ቀጥታ ወደ ጨዋታ ያስገባናል።</blockquote>\n` +
-    `<blockquote><b>🎮 ጨዋታ</b>\n\n` +
-    `1. ወደ ጨዋታው ስንገባ በመረጥነው የካርድ ቁጥር መሰረት የመጫወቻ ካርድ እናገኛለን።\n\n` +
-    `2. ጨዋታው ሲጀምር የተለያዪ ቁጥሮች ከ1 እስከ 75 መጥራት ይጀምራል።\n\n` +
-    `3. የሚጠራው ቁጥር የኛ መጫወቻ ካርድ ውስጥ ካለ የተጠራውን ቁጥር ክሊክ በማረግ መምረጥ እንችላለን።\n\n` +
-    `4. የመረጥነውን ቁጥር ማጥፋት ከፈለግን መልሰን እራሱን ቁጥር ክሊክ በማረግ ማጥፋት እንችላለን።</blockquote>\n` +
-    `<blockquote><b>🏆 አሸናፊ</b>\n\n` +
-    `1. ቁጥሮቹ ሲጠሩ ከመጫወቻ ካርዳችን ላይ እየመረጥን ወደጎን ወይም ወደታች ወይም ወደሁለቱም አግዳሚ ወይም አራቱን ማእዘናት ከመረጥን ወዲያውኑ ከታች በኩል <b>bingo</b> የሚለውን በመንካት ማሸነፍ እንችላለን።\n\n` +
-    `2. ወደጎን ወይም ወደታች ወይም ወደሁለቱም አግዳሚ ወይም አራቱን ማእዘናት ሳይጠሩ <b>bingo</b> የሚለውን ክሊክ ካደረግን ከጨዋታው እንታገዳለን።\n\n` +
-    `3. ሁለት ወይም ከዚያ በላይ ተጫዋቾች እኩል ቢያሸንፉ ደራሹ ለቁጥራቸው ይካፈላል።</blockquote>`;
+    `<blockquote><b>🃏 መጫወቻ ካርድ</b>\n\n1. ጨዋታውን ለመጀመር ከሚመጣልን ከ1-300 የመጫወቻ ካርድ ውስጥ አንዱን እንመርጣለን።\n\n2. የመጫወቻ ካርዱ ላይ በቀይ ቀለም የተመረጡ ቁጥሮች የሚያሳዩት መጫወቻ ካርድ በሌላ ተጫዋች መመረጡን ነው።\n\n3. የመጫወቻ ካርድ ስንነካው ከታች በኩል ካርድ ቁጥሩ የሚይዘዉን መጫወቻ ካርድ ያሳየናል።\n\n4. ወደ ጨዋታው ለመግባት የምንፈልገዉን ካርድ ከመረጥን ለምዝገባ የተሰጠው ሰኮንድ ዜሮ ሲሆን ቀጥታ ወደ ጨዋታ ያስገባናል።</blockquote>\n` +
+    `<blockquote><b>🎮 ጨዋታ</b>\n\n1. ወደ ጨዋታው ስንገባ በመረጥነው የካርድ ቁጥር መሰረት የመጫወቻ ካርድ እናገኛለን።\n\n2. ጨዋታው ሲጀምር የተለያዪ ቁጥሮች ከ1 እስከ 75 መጥራት ይጀምራል።\n\n3. የሚጠራው ቁጥር የኛ መጫወቻ ካርድ ውስጥ ካለ የተጠራውን ቁጥር ክሊክ በማረግ መምረጥ እንችላለን።\n\n4. የመረጥነውን ቁጥር ማጥፋት ከፈለግን መልሰን እራሱን ቁጥር ክሊክ በማረግ ማጥፋት እንችላለን።</blockquote>\n` +
+    `<blockquote><b>🏆 አሸናፊ</b>\n\n1. ቁጥሮቹ ሲጠሩ ከመጫወቻ ካርዳችን ላይ እየመረጥን ወደጎን ወይም ወደታች ወይም ወደሁለቱም አግዳሚ ወይም አራቱን ማእዘናት ከመረጥን ወዲያውኑ ከታች በኩል <b>bingo</b> የሚለውን በመንካት ማሸነፍ እንችላለን።\n\n2. ወደጎን ወይም ወደታች ወይም ወደሁለቱም አግዳሚ ወይም አራቱን ማእዘናት ሳይጠሩ <b>bingo</b> የሚለውን ክሊክ ካደረግን ከጨዋታው እንታገዳለን።\n\n3. ሁለት ወይም ከዚያ በላይ ተጫዋቾች እኩል ቢያሸንፉ ደራሹ ለቁጥራቸው ይካፈላል።</blockquote>`;
     ctx.replyWithHTML(htmlText);
 });
 
@@ -214,8 +211,34 @@ bot.action('dep', (ctx) => {
     ctx.reply("ማስገባት የፈለጉትን የብር መጠን ከ 10 ብር ጀምሮ ያስገቡ።");
 });
 
+// --- NEW WITHDRAWAL ACTIONS ---
+bot.action('withdraw_start', async (ctx) => {
+    ctx.answerCbQuery();
+    const u = await User.findOne({ telegramId: ctx.from.id.toString() });
+    if (!u || u.balance < 10) return ctx.reply("❌ ዝቅተኛ የማውጫ መጠን 10 ብር ነው።");
+    ctx.session = { state: 'WAIT_W_AMT' };
+    ctx.reply("💰 ማውጣት የሚፈልጉትን የገንዘብ መጠን ያስገቡ ?");
+});
+
+bot.action(/w_meth_(.+)/, (ctx) => {
+    const method = ctx.match[1];
+    ctx.session.method = method;
+    ctx.session.state = 'WAIT_W_ID';
+    const prompt = (method === 'CommercialBank' || method === 'Abyssinia') ? "እባክዎ የአካውንት ቁጥሮን ያስገቡ::" : "እባክዎ የስልክ ቁጥሮን ያስገቡ::";
+    ctx.editMessageText(`🏦 የመረጡት ዘዴ: ${method}\n👤 ${prompt}`);
+});
+
+bot.action('w_cancel', (ctx) => {
+    ctx.session = null;
+    ctx.editMessageText("❌ የገንዘብ ማውጣት ትዕዛዙ ተሰርዟል።");
+});
+
+// --- UPDATED TEXT HANDLER FOR WITHDRAWALS ---
 bot.on('text', async (ctx) => {
     const text = ctx.message.text;
+    const uid = ctx.from.id.toString();
+
+    // 1. DEPOSIT: Waiting for Amount
     if (ctx.session?.state === 'WAIT_AMT') {
         const amount = parseInt(text); if (isNaN(amount) || amount < 10) return ctx.reply("እባክዎን ከ 10 ብር በላይ ያስገቡ።");
         ctx.session.amount = amount; ctx.session.state = null;
@@ -224,6 +247,35 @@ bot.on('text', async (ctx) => {
             [Markup.button.callback("ABYSSINIA", "pay_aby"), Markup.button.callback("CBE BIRR", "pay_cbebirr")]
         ]));
     }
+
+    // 2. WITHDRAW: Waiting for Amount
+    if (ctx.session?.state === 'WAIT_W_AMT') {
+        const amt = parseInt(text);
+        const u = await User.findOne({ telegramId: uid });
+        if (isNaN(amt) || amt < 10 || amt > u.balance) return ctx.reply("❌ የተሳሳተ መጠን ያስገቡ። እባክዎ በቂ ገንዘብ እንዳለዎት እና ከ 10 በላይ መሆኑን ያረጋግጡ።");
+        ctx.session.w_amt = amt;
+        ctx.session.state = 'WAIT_W_METH';
+        return ctx.reply("💸 የሚፈልጉትን የክፍያ አማራጭ ይምረጡ:", withdrawMethods);
+    }
+
+    // 3. WITHDRAW: Waiting for ID
+    if (ctx.session?.state === 'WAIT_W_ID') {
+        ctx.session.w_id = text;
+        ctx.session.state = 'WAIT_W_NAME';
+        return ctx.reply("👤 እባክዎ የአካውንቱን ባለቤት ስም ያስገቡ::");
+    }
+
+    // 4. WITHDRAW: Final Step
+    if (ctx.session?.state === 'WAIT_W_NAME') {
+        const { w_amt, method, w_id } = ctx.session;
+        await User.findOneAndUpdate({ telegramId: uid }, { $inc: { balance: -w_amt } });
+        io.to(uid).emit('balance_update', 0);
+        ctx.reply(`✅ የገንዘብ ማውጣት ጥያቄዎ ለAdmin ተልኳል::\nመጠን: ${w_amt}\nዘዴ: ${method}\nID: ${w_id}\nስም: ${text}`);
+        if(ADMIN_ID) bot.telegram.sendMessage(ADMIN_ID, `🚨 WITHDRAWAL REQUEST\nUser: ${uid}\nAmt: ${w_amt}\nMeth: ${method}\nID: ${w_id}\nName: ${text}`);
+        ctx.session = null; return;
+    }
+
+    // 5. DEPOSIT REFERENCE CHECKER
     const data = parseBankSMS(text);
     if (data) {
         const smsRecord = await VerifiedSMS.findOne({ refNumber: data.ref, isUsed: false });
@@ -243,15 +295,15 @@ bot.action('pay_cbebirr', (ctx) => ctx.reply(`${supportHeader}\n\n1. ወደ 0922
 
 bot.on('contact', async (ctx) => { await User.findOneAndUpdate({ telegramId: ctx.from.id.toString() }, { phoneNumber: ctx.message.contact.phone_number, isRegistered: true }); ctx.reply("✅ ተመዝግበዋል!", mainKeyboard()); });
 bot.action('bal', async (ctx) => { const u = await User.findOne({ telegramId: ctx.from.id.toString() }); ctx.reply(`💰 Balance: ${u?.balance || 0} Birr`); });
-bot.action('withdraw', (ctx) => ctx.reply("🤑 Withdrawal: Send your number and amount to @sya9744"));
-bot.action('invite', (ctx) => ctx.reply(`🔗 Link: https://t.me/${ctx.botInfo.username}?start=${ctx.from.id}`));
+
 bot.launch();
 
+// --- 7. SERVE FRONTEND ---
 const publicPath = path.resolve(__dirname, 'public');
 app.use(express.static(publicPath));
 app.get('*', (req, res) => {
     if (req.path.includes('.') && !req.path.endsWith('.html')) return res.status(404).end();
     res.sendFile(path.join(publicPath, 'index.html'));
 });
-server.listen(PORT, '0.0.0.0', () => console.log(`🚀 Live on ${PORT}`));
 
+server.listen(PORT, '0.0.0.0', () => console.log(`🚀 Live on ${PORT}`));
