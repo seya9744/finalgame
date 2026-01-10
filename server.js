@@ -8,6 +8,7 @@ const mongoose = require('mongoose');
 const path = require('path');
 const fs = require('fs');
 
+// --- CONFIG ---
 const { BOT_TOKEN, MONGODB_URI, PORT = 10000, MINI_APP_URL, SMS_SECRET = "MY_SECRET_KEY" } = process.env;
 const app = express();
 const server = http.createServer(app);
@@ -36,7 +37,7 @@ const VerifiedSMS = mongoose.model('VerifiedSMS', new mongoose.Schema({
     createdAt: { type: Date, default: Date.now, expires: 172800 } 
 }));
 
-// --- 2. SMS API ---
+// --- 2. SMS API (UNIVERSAL) ---
 app.all('/api/incoming-sms', async (req, res) => {
     const incomingText = req.body.text || req.body.message || req.query.text || "";
     const data = parseBankSMS(incomingText);
@@ -47,7 +48,7 @@ app.all('/api/incoming-sms', async (req, res) => {
 });
 app.get('/ping', (req, res) => res.status(200).send("Awake"));
 
-// --- 3. BINGO ENGINE (STRICT SETTINGS) ---
+// --- 3. BINGO ENGINE ---
 function parseBankSMS(text) {
     if (!text) return null;
     const refMatch = text.match(/[A-Z0-9]{10,12}/);
@@ -81,6 +82,7 @@ function checkServerWin(card, drawnNumbers) {
     return false;
 }
 
+// --- 4. GAME STATE & LOOP ---
 let gameState = { phase: 'SELECTION', phaseEndTime: Date.now() + 40000, timer: 40, drawnNumbers: [], pot: 0, winner: null, totalPlayers: 0, takenCards: [] };
 let players = {}; let socketToUser = {};
 
@@ -98,7 +100,8 @@ setInterval(async () => {
                 gameState.phase = 'GAMEPLAY';
                 for (let tid in players) {
                     if (players[tid].cards?.length > 0) {
-                        const u = await User.findOneAndUpdate({ telegramId: tid }, { $inc: { balance: -(players[tid].cards.length * 10) } }, { new: true });
+                        const cost = players[tid].cards.length * 10;
+                        const u = await User.findOneAndUpdate({ telegramId: tid }, { $inc: { balance: -cost } }, { new: true });
                         if(u) io.to(tid).emit('balance_update', u.balance);
                     }
                 }
@@ -120,7 +123,7 @@ setInterval(() => {
     }
 }, 2500);
 
-// --- 4. SOCKETS ---
+// --- 5. SOCKETS ---
 io.on('connection', (socket) => {
     socket.on('register_user', async (data) => {
         try {
@@ -159,14 +162,14 @@ io.on('connection', (socket) => {
     });
 });
 
-// --- 5. BOT MENU & BEAUTIFIED INSTRUCTIONS ---
+// --- 6. BOT MENU & ACTIONS ---
 const bot = new Telegraf(BOT_TOKEN);
 bot.use(session());
 
 const mainKeyboard = () => Markup.inlineKeyboard([
     [Markup.button.webApp("Play 🎮", MINI_APP_URL), Markup.button.callback("Register 📝", "reg_prompt")],
     [Markup.button.callback("Check Balance 💵", "bal"), Markup.button.callback("Deposit 💰", "dep")],
-    [Markup.button.callback("Contact Support...", "support"), Markup.button.callback("Instruction 📖", "instructions_trigger")],
+    [Markup.button.callback("Contact Support...", "support_trigger"), Markup.button.callback("Instruction 📖", "instructions_trigger")],
     [Markup.button.callback("Transfer 🎁", "transfer"), Markup.button.callback("Withdraw 🤑", "withdraw")],
     [Markup.button.callback("Invite 🔗", "invite")]
 ]);
@@ -176,36 +179,33 @@ const supportHeader = `የሚያጋጥማቹ የክፍያ ችግር: \n @sya9744
 
 bot.start(async (ctx) => {
     const user = await User.findOneAndUpdate({ telegramId: ctx.from.id.toString() }, { username: ctx.from.first_name }, { upsert: true, new: true });
-    if (!user.isRegistered) await ctx.reply("Welcome!", contactKey);
+    if (!user.isRegistered) await ctx.reply("👋 Welcome! Click 'Share contact' to register.", contactKey);
     await ctx.reply(`👋 Welcome to Dil Bingo! Choose an Option below.`, mainKeyboard());
 });
 
-// BEAUTIFIED INSTRUCTIONS (MATCHES IMAGE)
+// UPDATED SUPPORT HANDLER
+bot.action('support_trigger', (ctx) => {
+    ctx.answerCbQuery();
+    ctx.reply(`🛠 Support:\n\nIf you need help, contact us here:\n👉 @sya9744\n👉 @komodo27`);
+});
+
 bot.action('instructions_trigger', (ctx) => {
     ctx.answerCbQuery();
-    const htmlText = 
-    `<b>📘 የቢንጎ ጨዋታ ህጎች</b>\n\n` +
-    `<blockquote>` +
-    `<b>🃏 መጫወቻ ካርድ</b>\n\n` +
+    const htmlText = `<b>📘 የቢንጎ ጨዋታ ህጎች</b>\n\n` +
+    `<blockquote><b>🃏 መጫወቻ ካርድ</b>\n\n` +
     `1. ጨዋታውን ለመጀመር ከሚመጣልን ከ1-300 የመጫወቻ ካርድ ውስጥ አንዱን እንመርጣለን።\n\n` +
     `2. የመጫወቻ ካርዱ ላይ በቀይ ቀለም የተመረጡ ቁጥሮች የሚያሳዩት መጫወቻ ካርድ በሌላ ተጫዋች መመረጡን ነው።\n\n` +
     `3. የመጫወቻ ካርድ ስንነካው ከታች በኩል ካርድ ቁጥሩ የሚይዘዉን መጫወቻ ካርድ ያሳየናል።\n\n` +
-    `4. ወደ ጨዋታው ለመግባት የምንፈልገዉን ካርድ ከመረጥን ለምዝገባ የተሰጠው ሰኮንድ ዜሮ ሲሆን ቀጥታ ወደ ጨዋታ ያስገባናል።\n` +
-    `</blockquote>\n` +
-    `<blockquote>` +
-    `<b>🎮 ጨዋታ</b>\n\n` +
+    `4. ወደ ጨዋታው ለመግባት የምንፈልገዉን ካርድ ከመረጥን ለምዝገባ የተሰጠው ሰኮንድ ዜሮ ሲሆን ቀጥታ ወደ ጨዋታ ያስገባናል።</blockquote>\n` +
+    `<blockquote><b>🎮 ጨዋታ</b>\n\n` +
     `1. ወደ ጨዋታው ስንገባ በመረጥነው የካርድ ቁጥር መሰረት የመጫወቻ ካርድ እናገኛለን።\n\n` +
     `2. ጨዋታው ሲጀምር የተለያዪ ቁጥሮች ከ1 እስከ 75 መጥራት ይጀምራል።\n\n` +
     `3. የሚጠራው ቁጥር የኛ መጫወቻ ካርድ ውስጥ ካለ የተጠራውን ቁጥር ክሊክ በማረግ መምረጥ እንችላለን።\n\n` +
-    `4. የመረጥነውን ቁጥር ማጥፋት ከፈለግን መልሰን እራሱን ቁጥር ክሊክ በማረግ ማጥፋት እንችላለን።\n` +
-    `</blockquote>\n` +
-    `<blockquote>` +
-    `<b>🏆 አሸናፊ</b>\n\n` +
+    `4. የመረጥነውን ቁጥር ማጥፋት ከፈለግን መልሰን እራሱን ቁጥር ክሊክ በማረግ ማጥፋት እንችላለን።</blockquote>\n` +
+    `<blockquote><b>🏆 አሸናፊ</b>\n\n` +
     `1. ቁጥሮቹ ሲጠሩ ከመጫወቻ ካርዳችን ላይ እየመረጥን ወደጎን ወይም ወደታች ወይም ወደሁለቱም አግዳሚ ወይም አራቱን ማእዘናት ከመረጥን ወዲያውኑ ከታች በኩል <b>bingo</b> የሚለውን በመንካት ማሸነፍ እንችላለን።\n\n` +
     `2. ወደጎን ወይም ወደታች ወይም ወደሁለቱም አግዳሚ ወይም አራቱን ማእዘናት ሳይጠሩ <b>bingo</b> የሚለውን ክሊክ ካደረግን ከጨዋታው እንታገዳለን።\n\n` +
-    `3. ሁለት ወይም ከዚያ በላይ ተጫዋቾች እኩል ቢያሸንፉ ደራሹ ለቁጥራቸው ይካፈላል።` +
-    `</blockquote>`;
-
+    `3. ሁለት ወይም ከዚያ በላይ ተጫዋቾች እኩል ቢያሸንፉ ደራሹ ለቁጥራቸው ይካፈላል።</blockquote>`;
     ctx.replyWithHTML(htmlText);
 });
 
@@ -237,12 +237,13 @@ bot.on('text', async (ctx) => {
 });
 
 bot.action('pay_tele', (ctx) => ctx.reply(`${supportHeader}\n\n1. ወደ 0922573939 (SEID) ${ctx.session.amount || 10} ብር ይላኩ\n\n2. የደረሰኙን መልዕክት Past ያድርጉ 👇`));
-bot.action('pay_cbe', (ctx) => ctx.reply(`${supportHeader}\n\n1. ወደ 1000102526418 (SEID) ${ctx.session.amount || 10} ብር ያስገቡ\n\n2. የደረሰኙን መልዕክት Past ያድርጉ 👇`));
+bot.action('pay_cbe', (ctx) => ctx.reply(`${supportHeader}\n\n1. ወደ 1000102526418 (Acc) ${ctx.session.amount || 10} ብር ያስገቡ\n\n2. የደረሰኙን መልዕክት Past ያድርጉ 👇`));
 bot.action('pay_aby', (ctx) => ctx.reply(`${supportHeader}\n\n1. ወደ 88472845 (Acc) ${ctx.session.amount || 10} ብር ያስገቡ\n\n2. የደረሰኙን መልዕክት Past ያድርጉ 👇`));
 bot.action('pay_cbebirr', (ctx) => ctx.reply(`${supportHeader}\n\n1. ወደ 0922573939 (CBE BIRR) ${ctx.session.amount || 10} ብር ይላኩ\n\n2. የደረሰኙን መልዕክት Past ያድርጉ 👇`));
+
 bot.on('contact', async (ctx) => { await User.findOneAndUpdate({ telegramId: ctx.from.id.toString() }, { phoneNumber: ctx.message.contact.phone_number, isRegistered: true }); ctx.reply("✅ ተመዝግበዋል!", mainKeyboard()); });
 bot.action('bal', async (ctx) => { const u = await User.findOne({ telegramId: ctx.from.id.toString() }); ctx.reply(`💰 Balance: ${u?.balance || 0} Birr`); });
-bot.action('support', (ctx) => ctx.reply("🛠 Support: @sya9744"));
+bot.action('withdraw', (ctx) => ctx.reply("🤑 Withdrawal: Send your number and amount to @sya9744"));
 bot.action('invite', (ctx) => ctx.reply(`🔗 Link: https://t.me/${ctx.botInfo.username}?start=${ctx.from.id}`));
 bot.launch();
 
@@ -252,4 +253,4 @@ app.get('*', (req, res) => {
     if (req.path.includes('.') && !req.path.endsWith('.html')) return res.status(404).end();
     res.sendFile(path.join(publicPath, 'index.html'));
 });
-server.listen(PORT, '0.0.0.0', () => console.log(`🚀 Server live`));
+server.listen(PORT, '0.0.0.0', () => console.log(`🚀 Live on ${PORT}`));
