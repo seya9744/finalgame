@@ -49,7 +49,7 @@ const VerifiedSMS = mongoose.model('VerifiedSMS', new mongoose.Schema({
     createdAt: { type: Date, default: Date.now, expires: 172800 } 
 }));
 
-// --- 2. SMS API ---
+// --- 2. SMS API & CRON ---
 app.all('/api/incoming-sms', async (req, res) => {
     const incomingText = req.body.text || req.body.message || req.query.text || "";
     const data = parseBankSMS(incomingText);
@@ -58,9 +58,12 @@ app.all('/api/incoming-sms', async (req, res) => {
     }
     res.status(200).send("OK");
 });
-app.get('/ping', (req, res) => res.status(200).send("Awake"));
 
-// --- 3. BINGO ENGINE ---
+app.get('/ping', (req, res) => {
+    console.log("⏱ Ping Received - Keeping Awake");
+    res.status(200).send("Awake");
+});
+
 function parseBankSMS(text) {
     if (!text) return null;
     const refMatch = text.match(/[A-Z0-9]{10,12}/);
@@ -68,13 +71,19 @@ function parseBankSMS(text) {
     return (refMatch && amountMatch) ? { ref: refMatch[0], amount: parseFloat(amountMatch[1]) } : null;
 }
 
+// --- 3. PERMANENT UNIQUE BINGO ENGINE ---
 function generateServerCard(id) {
     const seed = parseInt(id) || 1;
-    const rng = (s) => { let t = s += 0x6D2B79F5; t = Math.imul(t ^ t >>> 15, t | 1); t ^= t + Math.imul(t ^ t >>> 7, t | 61); return ((t ^ t >>> 14) >>> 0) / 4294967296; };
-    let columns = []; const ranges = [[1,15],[16,30],[31,45],[46,60],[61,75]];
+    let state = seed;
+    const nextRng = () => {
+        state = (state * 1664525 + 1013904223) % 4294967296;
+        return state / 4294967296;
+    };
+    let columns = [];
+    const ranges = [[1,15],[16,30],[31,45],[46,60],[61,75]];
     for(let i=0; i<5; i++) {
         let col = []; let [min, max] = ranges[i]; let pool = Array.from({length: max-min+1}, (_, k) => k + min);
-        for(let j=0; j<5; j++) { let idx = Math.floor(rng(seed + i * 10 + j) * pool.length); col.push(pool.splice(idx, 1)[0]); }
+        for(let j=0; j<5; j++) { let idx = Math.floor(nextRng() * pool.length); col.push(pool.splice(idx, 1)[0]); }
         columns.push(col);
     }
     let card = []; for(let r=0; r<5; r++) card.push([columns[0][r], columns[1][r], columns[2][r], columns[3][r], columns[4][r]]);
@@ -102,21 +111,18 @@ setInterval(async () => {
     if (timeLeft < 0) timeLeft = 0;
     gameState.timer = timeLeft;
 
-    if (gameState.phase === 'SELECTION') {
+    if (gameState.phase === 'SELECTION' && timeLeft <= 0) {
         let total = 0; Object.values(players).forEach(p => { if (p.cards) total += p.cards.length; });
-        gameState.totalPlayers = total; gameState.pot = total * 10;
-        if (timeLeft <= 0) {
-            if (total >= 2) {
-                gameState.phase = 'GAMEPLAY';
-                for (let tid in players) {
-                    if (players[tid].cards?.length > 0) {
-                        const cost = players[tid].cards.length * 10;
-                        const u = await User.findOneAndUpdate({ telegramId: tid }, { $inc: { balance: -cost } }, { new: true });
-                        if(u) io.to(tid).emit('balance_update', u.balance);
-                    }
+        if (total >= 2) {
+            gameState.phase = 'GAMEPLAY';
+            for (let tid in players) {
+                if (players[tid].cards?.length > 0) {
+                    await User.findOneAndUpdate({ telegramId: tid }, { $inc: { balance: -(players[tid].cards.length * 10) } });
+                    const u = await User.findOne({ telegramId: tid });
+                    if(u) io.to(tid).emit('balance_update', u.balance);
                 }
-            } else { gameState.phaseEndTime = Date.now() + 40000; }
-        }
+            }
+        } else { gameState.phaseEndTime = Date.now() + 40000; }
     }
     if (gameState.phase === 'WINNER' && timeLeft <= 0) {
         gameState = { phase: 'SELECTION', phaseEndTime: Date.now() + 40000, timer: 40, drawnNumbers: [], pot: 0, winner: null, totalPlayers: 0, takenCards: [] };
@@ -149,11 +155,10 @@ io.on('connection', (socket) => {
         } catch (e) {}
     });
 
-    socket.on('buy_card', async (cardIds) => {
+    // FIXED: Removed DB check here to make card selection INSTANT and avoid glitching
+    socket.on('buy_card', (cardIds) => {
         const tid = socketToUser[socket.id];
         if (tid && gameState.phase === 'SELECTION') {
-            const u = await User.findOne({ telegramId: tid });
-            if (!u || u.balance < cardIds.length * 10) return socket.emit('error_message', "Insufficient Balance!");
             players[tid].cards = cardIds;
             let allTaken = []; let total = 0;
             Object.values(players).forEach(pl => { if(pl.cards) { allTaken.push(...pl.cards); total += pl.cards.length; } });
@@ -200,7 +205,6 @@ io.on('connection', (socket) => {
     socket.on('get_wallet_history', async (data) => {
         try {
             const urlParams = new URLSearchParams(data.initData); const user = JSON.parse(urlParams.get('user'));
-            // FIXED: Only find real database records
             const deposits = await VerifiedSMS.find({ usedBy: user.id.toString() }).sort({ createdAt: -1 }).limit(10);
             socket.emit('wallet_history_data', deposits);
         } catch (e) {}
@@ -218,11 +222,11 @@ bot.telegram.setMyCommands([
 ]);
 bot.telegram.setChatMenuButton({ menuButton: { type: 'default' } });
 
-const mainKeyboard = (reg) => Markup.inlineKeyboard([
-    reg ? [Markup.button.webApp("Play 🎮", MINI_APP_URL), Markup.button.callback("Register 📝", "reg_prompt")] : [Markup.button.callback("Register 📝", "reg_prompt")],
+const mainKeyboard = (isReg) => Markup.inlineKeyboard([
+    isReg ? [Markup.button.webApp("Play 🎮", MINI_APP_URL), Markup.button.callback("Register 📝", "reg_prompt")] : [Markup.button.callback("Register 📝", "reg_prompt")],
     [Markup.button.callback("Check Balance 💵", "bal"), Markup.button.callback("Deposit 💰", "dep")],
     [Markup.button.callback("Contact Support...", "support_trigger"), Markup.button.callback("Instruction 📖", "instructions_trigger")],
-    [Markup.button.callback("Transfer 🎁", "transfer"), Markup.button.callback("Withdraw 🤑", "w_start")],
+    [Markup.button.callback("Transfer 🎁", "transfer"), Markup.button.callback("Withdraw 🤑", "withdraw_start")],
     [Markup.button.callback("Invite 🔗", "invite")]
 ]);
 
@@ -264,7 +268,7 @@ bot.action('instructions_trigger', (ctx) => {
 });
 
 bot.action('dep', (ctx) => { ctx.session = { state: 'WAIT_AMT' }; ctx.reply("ማስገባት የፈለጉትን የብር መጠን ከ 10 ብር ጀምሮ ያስገቡ።"); });
-bot.action('w_start', async (ctx) => {
+bot.action('withdraw_start', async (ctx) => {
     const u = await User.findOne({ telegramId: ctx.from.id.toString() });
     if (!u || u.balance < 50) return ctx.reply("ዝቅተኛ ማውጣት የሚቻለው 50 ብር ነው ።");
     ctx.session = { state: 'WAIT_W_AMT' }; ctx.reply("💰 ማውጣት የሚፈልጉትን የገንዘብ መጠን ያስገቡ ?");
@@ -317,10 +321,12 @@ bot.action('bal', async (ctx) => { const u = await User.findOne({ telegramId: ct
 
 bot.launch();
 
+// --- 7. SERVE FRONTEND ---
 const publicPath = path.resolve(__dirname, 'public');
 app.use(express.static(publicPath));
 app.get('*', (req, res) => {
     if (req.path.includes('.') && !req.path.endsWith('.html')) return res.status(404).end();
     res.sendFile(path.join(publicPath, 'index.html'));
 });
+
 server.listen(PORT, '0.0.0.0', () => console.log(`🚀 Live on ${PORT}`));
