@@ -26,7 +26,18 @@ const User = mongoose.model('User', new mongoose.Schema({
     username: String,
     phoneNumber: { type: String, default: "Not Registered" },
     balance: { type: Number, default: 0 },
+    coins: { type: Number, default: 0 },    // NEW: For real-time conversion
+    gamesWon: { type: Number, default: 0 }, // NEW: For Leaderboard
+    totalPlayed: { type: Number, default: 0 }, // NEW: For Leaderboard
     isRegistered: { type: Boolean, default: false }
+}));
+const GameRecord = mongoose.model('GameRecord', new mongoose.Schema({
+    telegramId: String,
+    gameId: String,
+    status: String, // "Won" or "Lost"
+    stake: Number,
+    prize: Number,
+    date: { type: Date, default: Date.now }
 }));
 
 const VerifiedSMS = mongoose.model('VerifiedSMS', new mongoose.Schema({
@@ -157,14 +168,52 @@ io.on('connection', (socket) => {
             if (checkServerWin(card, gameState.drawnNumbers)) {
                 const prize = Math.floor(gameState.pot * 0.8);
                 gameState.winner = { username: players[tid].username, prize, cardId: data.cardId };
-                const u = await User.findOneAndUpdate({ telegramId: tid }, { $inc: { balance: prize } }, { new: true });
-                if(u) io.to(tid).emit('balance_update', u.balance);
-                gameState.phase = 'WINNER'; gameState.phaseEndTime = Date.now() + 7000; io.emit('game_tick', gameState);
+
+                // REAL-TIME UPDATE: Winner Stats
+                await User.findOneAndUpdate({ telegramId: tid }, { 
+                    $inc: { balance: prize, gamesWon: 1, totalPlayed: 1 } 
+                });
+                
+                // SAVE TO HISTORY for the winner
+                await GameRecord.create({ 
+                    telegramId: tid, gameId: "BBU7EN", status: "Won", stake: players[tid].cards.length * 10, prize: prize 
+                });
+
+                // SAVE TO HISTORY for all other players (Losers)
+                for (let otherTid in players) {
+                    if (otherTid !== tid && players[otherTid].cards?.length > 0) {
+                        await User.findOneAndUpdate({ telegramId: otherTid }, { $inc: { totalPlayed: 1 } });
+                        await GameRecord.create({ 
+                            telegramId: otherTid, gameId: "BBU7EN", status: "Lost", stake: players[otherTid].cards.length * 10, prize: 0 
+                        });
+                    }
+                }
+
+                const u = await User.findOne({ telegramId: tid });
+                io.to(tid).emit('balance_update', u.balance);
+                gameState.phase = 'WINNER'; 
+                gameState.phaseEndTime = Date.now() + 7000; 
+                io.emit('game_tick', gameState);
             }
         }
     });
-});
+    // FETCH REAL-TIME LEADERBOARD
+    socket.on('get_leaderboard', async () => {
+        const topPlayers = await User.find({ isRegistered: true })
+            .sort({ gamesWon: -1 }) // Sort by most wins
+            .limit(10);
+        socket.emit('leaderboard_data', topPlayers);
+    });
 
+    // FETCH REAL-TIME HISTORY
+    socket.on('get_history', async (data) => {
+        const urlParams = new URLSearchParams(data.initData);
+        const user = JSON.parse(urlParams.get('user'));
+        const history = await GameRecord.find({ telegramId: user.id.toString() })
+            .sort({ date: -1 })
+            .limit(20);
+        socket.emit('history_data', history);
+    });
 // --- 6. BOT LOGIC (MENU & BANKING) ---
 const bot = new Telegraf(BOT_TOKEN);
 bot.use(session());
