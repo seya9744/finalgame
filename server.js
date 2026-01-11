@@ -48,7 +48,7 @@ const VerifiedSMS = mongoose.model('VerifiedSMS', new mongoose.Schema({
     createdAt: { type: Date, default: Date.now, expires: 172800 } 
 }));
 
-// --- 2. SMS API (UNIVERSAL) ---
+// --- 2. SMS API ---
 app.all('/api/incoming-sms', async (req, res) => {
     const incomingText = req.body.text || req.body.message || req.query.text || "";
     const data = parseBankSMS(incomingText);
@@ -148,14 +148,31 @@ io.on('connection', (socket) => {
         } catch (e) {}
     });
 
+    // --- FIXED: REAL-TIME BROADCAST OF TAKEN CARTELS ---
     socket.on('buy_card', async (cardIds) => {
         const tid = socketToUser[socket.id];
         if (tid && gameState.phase === 'SELECTION') {
             const u = await User.findOne({ telegramId: tid });
-            if (!u || u.balance < cardIds.length * 10) return socket.emit('error_message', "Insufficient!");
+            if (!u || u.balance < cardIds.length * 10) return socket.emit('error_message', "Insufficient Balance!");
+            
             players[tid].cards = cardIds;
-            let all = []; Object.values(players).forEach(pl => { if(pl.cards) all.push(...pl.cards); });
-            gameState.takenCards = all;
+            
+            // Recalculate ALL taken cards immediately
+            let allTaken = []; 
+            let totalCards = 0;
+            Object.values(players).forEach(pl => { 
+                if(pl.cards) {
+                    allTaken.push(...pl.cards); 
+                    totalCards += pl.cards.length;
+                }
+            });
+            
+            gameState.takenCards = allTaken;
+            gameState.totalPlayers = totalCards;
+            gameState.pot = totalCards * 10;
+
+            // CRITICAL FIX: Emit to everyone the moment a change happens
+            io.emit('game_tick', gameState);
         }
     });
 
@@ -196,7 +213,7 @@ io.on('connection', (socket) => {
     });
 });
 
-// --- 6. BOT LOGIC (RESTORED PROFESSIONAL MENU) ---
+// --- 6. BOT LOGIC ---
 const bot = new Telegraf(BOT_TOKEN);
 bot.use(session());
 
@@ -213,7 +230,7 @@ const mainKeyboard = (isRegistered) => {
     else { rows.push([Markup.button.callback("Register 📝", "reg_prompt")]); }
     rows.push([Markup.button.callback("Check Balance 💵", "bal"), Markup.button.callback("Deposit 💰", "dep")]);
     rows.push([Markup.button.callback("Contact Support...", "support_trigger"), Markup.button.callback("Instruction 📖", "instructions_trigger")]);
-    rows.push([Markup.button.callback("Transfer 🎁", "transfer"), Markup.button.callback("Withdraw 🤑", "w_start")]);
+    rows.push([Markup.button.callback("Transfer 🎁", "transfer"), Markup.button.callback("Withdraw 🤑", "withdraw_start")]);
     rows.push([Markup.button.callback("Invite 🔗", "invite")]);
     return Markup.inlineKeyboard(rows);
 };
@@ -249,9 +266,9 @@ bot.on('contact', async (ctx) => {
 bot.action('instructions_trigger', (ctx) => {
     ctx.answerCbQuery();
     const htmlText = `<b>📘 የቢንጎ ጨዋታ ህጎች</b>\n\n` +
-    `<blockquote><b>🃏 መጫወቻ ካርድ</b>\n\n1. ከ1-300 ካርድ አንዱን እንመርጣለን።\n2. ቀይ ማለት ሌላ ሰው መርጦታል።\n3. ሲነኩት Preview ያሳያል።\n4. ምዝገባ ሲያልቅ ወደ ጨዋታ ያስገባናል።</blockquote>\n\n` +
+    `<blockquote><b>🃏 መጫወቻ ካርድ</b>\n\n1. ጨዋታውን ለመጀመር ከሚመጣልን ከ1-300 የመጫወቻ ካርድ ውስጥ አንዱን እንመርጣለን።\n2. ቀይ ማለት ሌላ ሰው መርጦታል።\n3. ሲነኩት Preview ያሳየናል።\n4. ምዝገባ ሲያልቅ ወደ ጨዋታ ያስገባናል።</blockquote>\n\n` +
     `<blockquote><b>🎮 ጨዋታ</b>\n\n1. ቁጥሮች ከ1-75 ይጠራሉ::\n2. ካርዶ ላይ ካለ ክሊክ በማረግ ይምረጡ::</blockquote>\n\n` +
-    `<blockquote><b>🏆 አሸናፊ</b>\n\n1. መስመር ሲሞሉ <b>bingo</b> ይበሉ::\n2. ተሳስተው ቢጫኑ ይታገዳሉ::</blockquote>`;
+    `<blockquote><b>🏆 አሸናፊ</b>\n1. መስመር ሲሞሉ <b>bingo</b> ይበሉ::\n2. ተሳስተው ቢጫኑ ይታገዳሉ::</blockquote>`;
     ctx.replyWithHTML(htmlText);
 });
 
@@ -303,17 +320,19 @@ bot.action(/w_meth_(.+)/, (ctx) => {
 bot.action('w_cancel', (ctx) => { ctx.session = null; ctx.editMessageText("❌ ተሰርዟል።"); });
 bot.action('bal', async (ctx) => { const u = await User.findOne({ telegramId: ctx.from.id.toString() }); ctx.reply(`💰 Balance: ${u?.balance || 0} Birr`); });
 
-bot.action('pay_tele', (ctx) => ctx.reply(`${supportHeader}\n\n1. ወደ 0922573939 (SEID) ${ctx.session.amount || 10} ብር ይላኩ\n\n2. መልዕክቱን እዚህ Past ያድርጉ 👇`));
-bot.action('pay_cbe', (ctx) => ctx.reply(`${supportHeader}\n\n1. ወደ 1000102526418 (Acc) ${ctx.session.amount || 10} ብር ያስገቡ\n\n2. መልዕክቱን እዚህ Past ያድርጉ 👇`));
-bot.action('pay_aby', (ctx) => ctx.reply(`${supportHeader}\n\n1. ወደ 88472845 (Acc) ${ctx.session.amount || 10} ብር ያስገቡ\n\n2. መልዕክቱን እዚህ Past ያድርጉ 👇`));
-bot.action('pay_cbebirr', (ctx) => ctx.reply(`${supportHeader}\n\n1. ወደ 0922573939 (CBE BIRR) ${ctx.session.amount || 10} ብር ይላኩ\n\n2. መልዕክቱን እዚህ Past ያድርጉ 👇`));
+bot.action('pay_tele', (ctx) => ctx.reply(`${supportHeader}\n\n1. ወደ 0922573939 (SEID) ${ctx.session.amount || 10} ብር ይላኩ\n\n2. የደረሰኙን መልዕክት Past ያድርጉ 👇`));
+bot.action('pay_cbe', (ctx) => ctx.reply(`${supportHeader}\n\n1. ወደ 1000102526418 (Acc) ${ctx.session.amount || 10} ብር ያስገቡ\n\n2. የደረሰኙን መልዕክት Past ያድርጉ 👇`));
+bot.action('pay_aby', (ctx) => ctx.reply(`${supportHeader}\n\n1. ወደ 88472845 (Acc) ${ctx.session.amount || 10} ብር ያስገቡ\n\n2. የደረሰኙን መልዕክት Past ያድርጉ 👇`));
+bot.action('pay_cbebirr', (ctx) => ctx.reply(`${supportHeader}\n\n1. ወደ 0922573939 (CBE BIRR) ${ctx.session.amount || 10} ብር ይላኩ\n\n2. የደረሰኙን መልዕክት Past ያድርጉ 👇`));
 
 bot.launch();
 
+// --- 7. SERVE FRONTEND ---
 const publicPath = path.resolve(__dirname, 'public');
 app.use(express.static(publicPath));
 app.get('*', (req, res) => {
     if (req.path.includes('.') && !req.path.endsWith('.html')) return res.status(404).end();
     res.sendFile(path.join(publicPath, 'index.html'));
 });
+
 server.listen(PORT, '0.0.0.0', () => console.log(`🚀 Live on ${PORT}`));
