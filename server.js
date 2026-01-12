@@ -36,15 +36,10 @@ const GameRecord = mongoose.model('GameRecord', new mongoose.Schema({
 }));
 
 const VerifiedSMS = mongoose.model('VerifiedSMS', new mongoose.Schema({
-    refNumber: { type: String, unique: true },
-    amount: Number,
-    fullText: String,
-    isUsed: { type: Boolean, default: false },
-    usedBy: { type: String, default: null }, 
-    createdAt: { type: Date, default: Date.now, expires: 172800 } 
+    refNumber: { type: String, unique: true }, amount: Number, fullText: String, isUsed: { type: Boolean, default: false }, usedBy: { type: String, default: null }, createdAt: { type: Date, default: Date.now, expires: 172800 } 
 }));
 
-// --- 2. SMS API & PING (FOR ZEROGIC) ---
+// --- 2. SMS API ---
 app.all('/api/incoming-sms', async (req, res) => {
     const incomingText = req.body.text || req.body.message || req.query.text || "";
     const data = parseBankSMS(incomingText);
@@ -53,12 +48,9 @@ app.all('/api/incoming-sms', async (req, res) => {
     }
     res.status(200).send("OK");
 });
+app.get('/ping', (req, res) => res.status(200).send("Awake"));
 
-app.get('/ping', (req, res) => {
-    console.log("⏱ Ping Received - Keeping Awake");
-    res.status(200).send("Awake");
-});
-
+// --- 3. BINGO ENGINE ---
 function parseBankSMS(text) {
     if (!text) return null;
     const refMatch = text.match(/[A-Z0-9]{10,12}/);
@@ -66,7 +58,6 @@ function parseBankSMS(text) {
     return (refMatch && amountMatch) ? { ref: refMatch[0], amount: parseFloat(amountMatch[1]) } : null;
 }
 
-// --- 3. BINGO ENGINE (DETERMINISTIC) ---
 function generateServerCard(id) {
     const seed = parseInt(id) || 1;
     let state = seed;
@@ -102,18 +93,22 @@ setInterval(async () => {
     if (timeLeft < 0) timeLeft = 0;
     gameState.timer = timeLeft;
 
-    if (gameState.phase === 'SELECTION' && timeLeft <= 0) {
-        let total = 0; Object.values(players).forEach(p => { if (p.cards) total += p.cards.length; });
-        if (total >= 2) {
-            gameState.phase = 'GAMEPLAY';
-            for (let tid in players) {
-                if (players[tid].cards?.length > 0) {
-                    await User.findOneAndUpdate({ telegramId: tid }, { $inc: { balance: -(players[tid].cards.length * 10) } });
-                    const u = await User.findOne({ telegramId: tid });
-                    if(u) io.to(tid).emit('balance_update', u.balance);
+    if (gameState.phase === 'SELECTION') {
+        let totalCards = 0; Object.values(players).forEach(p => { if (p.cards) totalCards += p.cards.length; });
+        gameState.totalPlayers = totalCards; gameState.pot = totalCards * 10;
+        if (timeLeft <= 0) {
+            if (totalCards >= 2) {
+                gameState.phase = 'GAMEPLAY';
+                for (let tid in players) {
+                    if (players[tid].cards?.length > 0) {
+                        const cost = players[tid].cards.length * 10;
+                        await User.findOneAndUpdate({ telegramId: tid }, { $inc: { balance: -cost } });
+                        const u = await User.findOne({ telegramId: tid });
+                        if(u) io.to(tid).emit('balance_update', u.balance);
+                    }
                 }
-            }
-        } else { gameState.phaseEndTime = Date.now() + 40000; }
+            } else { gameState.phaseEndTime = Date.now() + 40000; }
+        }
     }
     if (gameState.phase === 'WINNER' && timeLeft <= 0) {
         gameState = { phase: 'SELECTION', phaseEndTime: Date.now() + 40000, timer: 40, drawnNumbers: [], pot: 0, winner: null, totalPlayers: 0, takenCards: [] };
@@ -138,7 +133,7 @@ io.on('connection', (socket) => {
             socket.join(tid); socketToUser[socket.id] = tid;
             const u = await User.findOne({ telegramId: tid });
             if (u) {
-                if (!u.isRegistered) return socket.emit('error_message', "እባክዎ መጀመሪያ በBot ውስጥ ስልክዎን ያጋሩ (Register)!");
+                if (!u.isRegistered) return socket.emit('error_message', "Register in bot first!");
                 socket.emit('user_data', { balance: u.balance, phoneNumber: u.phoneNumber });
                 if (!players[tid]) players[tid] = { cards: [], username: u.username };
                 if (players[tid].cards.length > 0) socket.emit('restore_cards', players[tid].cards);
@@ -154,7 +149,7 @@ io.on('connection', (socket) => {
             let allT = []; let total = 0;
             Object.values(players).forEach(pl => { if(pl.cards) { allT.push(...pl.cards); total += pl.cards.length; } });
             gameState.takenCards = allT; gameState.totalPlayers = total; gameState.pot = total * 10;
-            io.emit('game_tick', gameState); // INSTANT UPDATE Logic
+            io.emit('game_tick', gameState); // Atomic update to fix selection lag
         }
     });
 
@@ -196,13 +191,13 @@ io.on('connection', (socket) => {
     socket.on('get_wallet_history', async (data) => {
         try {
             const urlParams = new URLSearchParams(data.initData); const user = JSON.parse(urlParams.get('user'));
-            const deposits = await VerifiedSMS.find({ usedBy: user.id.toString() }).sort({ createdAt: -1 }).limit(10);
+            const deposits = await VerifiedSMS.find({ usedBy: user.id.toString() }).sort({ createdAt: -1 });
             socket.emit('wallet_history_data', deposits);
         } catch (e) {}
     });
 });
 
-// --- 6. BOT MENU & ACTIONS ---
+// --- 6. BOT MENU ---
 const bot = new Telegraf(BOT_TOKEN);
 bot.use(session());
 
@@ -214,98 +209,86 @@ bot.telegram.setMyCommands([
 bot.telegram.setChatMenuButton({ menuButton: { type: 'default' } });
 
 const mainKeyboard = (isReg) => {
-    const r = [];
-    if (isReg) r.push([Markup.button.webApp("Play 🎮", MINI_APP_URL), Markup.button.callback("Register 📝", "reg_prompt")]);
-    else r.push([Markup.button.callback("Register 📝", "reg_prompt")]);
-    r.push([Markup.button.callback("Check Balance 💵", "bal"), Markup.button.callback("Deposit 💰", "dep")]);
-    r.push([Markup.button.callback("Contact Support...", "support_trigger"), Markup.button.callback("Instruction 📖", "instructions_trigger")]);
-    r.push([Markup.button.callback("Transfer 🎁", "transfer"), Markup.button.callback("Withdraw 🤑", "w_start")]);
-    r.push([Markup.button.callback("Invite 🔗", "invite")]);
-    return Markup.inlineKeyboard(r);
+    const rows = [];
+    if (isReg) rows.push([Markup.button.webApp("Play 🎮", MINI_APP_URL), Markup.button.callback("Register 📝", "reg_prompt")]);
+    else rows.push([Markup.button.callback("Register 📝", "reg_prompt")]);
+    rows.push([Markup.button.callback("Balance 💵", "bal"), Markup.button.callback("Deposit 💰", "dep")]);
+    rows.push([Markup.button.callback("Contact Support...", "support_trigger"), Markup.button.callback("Instruction 📖", "instructions_trigger")]);
+    rows.push([Markup.button.callback("Transfer 🎁", "transfer"), Markup.button.callback("Withdraw 🤑", "w_start")]);
+    rows.push([Markup.button.callback("Invite 🔗", "invite")]);
+    return Markup.inlineKeyboard(rows);
 };
 
+const contactKey = Markup.keyboard([[Markup.button.contactRequest("📞 Share contact")]]).resize().oneTime();
 const supportHeader = `የሚያጋጥማቹ የክፍያ ችግር: \n @sya9744\n@Komodo27 ላይ ፃፉልን።`;
 
 bot.start(async (ctx) => {
-    const u = await User.findOneAndUpdate({ telegramId: ctx.from.id.toString() }, { username: ctx.from.first_name }, { upsert: true, new: true });
-    if (!u.isRegistered) await ctx.reply("Welcome! Share your contact to earn 10 Birr Bonus.", Markup.keyboard([[Markup.button.contactRequest("📞 Share contact")]]).resize().oneTime());
-    await ctx.reply(`👋 Welcome to Dil Bingo! Choose an Option below.`, mainKeyboard(u.isRegistered));
+    const user = await User.findOneAndUpdate({ telegramId: ctx.from.id.toString() }, { username: ctx.from.first_name }, { upsert: true, new: true });
+    if (!user.isRegistered) await ctx.reply("Share phone to earn 10 Birr Bonus.", contactKey);
+    await ctx.reply(`👋 Welcome to Dil Bingo! Choose an Option below.`, mainKeyboard(user.isRegistered));
 });
 
 bot.on('contact', async (ctx) => {
     const ex = await User.findOne({ telegramId: ctx.from.id.toString() });
-    let msg = "";
+    let bonus = "";
     if (ex && !ex.isRegistered) {
         await User.findOneAndUpdate({ telegramId: ctx.from.id.toString() }, { phoneNumber: ctx.message.contact.phone_number, isRegistered: true, $inc: { balance: 10 } });
-        msg = "\n🎁 ለእርሶ የ 10 ብር የጅማሮ ቦነስ ተጨምሯል!";
+        bonus = "\n🎁 ለእርሶ የ 10 ብር ቦነስ ተጨምሯል!";
     } else {
         await User.findOneAndUpdate({ telegramId: ctx.from.id.toString() }, { phoneNumber: ctx.message.contact.phone_number, isRegistered: true });
     }
-    ctx.reply(`✅ ተመዝግበዋል! አሁን መጫወት ይችላሉ።${msg}`, Markup.removeKeyboard());
+    ctx.reply(`✅ ተመዝግበዋል!${bonus}`, Markup.removeKeyboard());
     ctx.reply("Main Menu:", mainKeyboard(true));
 });
 
 bot.action('instructions_trigger', (ctx) => {
     ctx.answerCbQuery();
-    const html = `<b>📘 የቢንጎ ጨዋታ ህጎች</b>\n\n` +
-    `<blockquote><b>🃏 መጫወቻ ካርድ</b>\n\n1. ጨዋታውን ለመጀመር ከሚመጣልን ከ1-300 የመጫወቻ ካርድ ውስጥ አንዱን እንመርጣለን።\n\n2. በቀይ የተመረጡት በሌላ ተጫዋች መመረጡን ነው።</blockquote>\n\n` +
-    `<blockquote><b>🎮 ጨዋታ</b>\n\n1. ቁጥሮች ከ1-75 ይጠራሉ::\n\n2. ካርዶ ላይ ካለ ክሊክ ያርጉ::</blockquote>\n\n` +
-    `<blockquote><b>🏆 አሸናፊ</b>\n\n1. መስመር ሲሞሉ <b>bingo</b> ይበሉ::\n\n2. ተሳስተው ቢጫኑ ይታገዳሉ::</blockquote>`;
-    ctx.replyWithHTML(html);
+    ctx.replyWithHTML(`<b>📘 የቢንጎ ጨዋታ ህጎች</b>\n\n` +
+    `<blockquote><b>🃏 መጫወቻ ካርድ</b>\n\n1. ከ1-300 ካርድ አንዱን እንመርጣለን።\n2. ቀይ ቀለም የተመረጡት በሌልች ተጫዋቾች ነው።\n3. የመጫወቻ ካርድ ሲነካ Preview ያሳያል።\n4. ጊዜ ሲያልቅ ጨዋታው ይጀምራል።</blockquote>\n\n` +
+    `<blockquote><b>🎮 ጨዋታ</b>\n\n1. ቁጥሮች ከ1 እስከ 75 ይጠራሉ።\n2. ካርዶ ላይ ካለ ቁጥሩን ይንኩት።\n3. የተሳሳቱ ከጨዋታ ይታገዳሉ።</blockquote>\n\n` +
+    `<blockquote><b>🏆 አሸናፊ</b>\n\n1. መስመር ሲሞሉ Bingo በመንካት ያሸንፉ።</blockquote>`);
 });
 
 bot.action('dep', (ctx) => { ctx.session = { state: 'WAIT_AMT' }; ctx.reply("ማስገባት የፈለጉትን የብር መጠን ከ 10 ብር ጀምሮ ያስገቡ።"); });
-
 bot.action('w_start', async (ctx) => {
     const u = await User.findOne({ telegramId: ctx.from.id.toString() });
-    if (!u || u.balance < 50) return ctx.reply("ዝቅተኛ ማውጣት የሚቻለውየገንዘብ መጠን 50 ብር ነው ።");
-    if (u.balance < 50) return ctx.reply("ገንዘብ ለማውጣት በቂ Balance የለዎአትም። እባክዎ Deposit በማድረግ ይጫወቱ።");
-    ctx.session = { state: 'WAIT_W_AMT' }; ctx.reply("💰 ማውጣት የሚፈልጉትን የገንዘብ መጠን ያስገቡ ?");
+    if (!u || u.balance < 50) return ctx.reply("ዝቅተኛ ማውጫ 50 ብር ነው::");
+    ctx.session = { state: 'WAIT_W' }; ctx.reply("💰 ማውጣት የሚፈልጉትን መጠን ያስገቡ?");
 });
 
 bot.on('text', async (ctx) => {
-    const txt = ctx.message.text; const uid = ctx.from.id.toString();
+    const text = ctx.message.text; const uid = ctx.from.id.toString();
     if (ctx.session?.state === 'WAIT_AMT') {
-        const a = parseInt(txt); if (isNaN(a) || a < 10) return ctx.reply("ከ 10 ብር በላይ ያስገቡ።");
-        ctx.session.amount = a; ctx.session.state = null;
-        return ctx.reply(`መጠን: ${a} ብር\nዘዴ ይምረጡ:`, Markup.inlineKeyboard([[Markup.button.callback("TELEBIRR", "pay_tele"), Markup.button.callback("CBE", "pay_cbe")]]));
+        const amt = parseInt(text); if (isNaN(amt) || amt < 10) return ctx.reply("ከ 10 ብር በላይ ያስገቡ።");
+        ctx.session.amount = amt; ctx.session.state = null;
+        return ctx.reply(`መጠን: ${amt} ብር. ይምረጡ:`, Markup.inlineKeyboard([[Markup.button.callback("TELEBIRR", "pay_tele"), Markup.button.callback("CBE", "pay_cbe")]]));
     }
-    if (ctx.session?.state === 'WAIT_W_AMT') {
-        const a = parseInt(txt); const u = await User.findOne({ telegramId: uid });
-        if (isNaN(a) || a < 50) return ctx.reply("ዝቅተኛ 50 ብር ነው ።");
-        if (a > u.balance) return ctx.reply("በቂ Balance የለዎአትም።");
-        ctx.session.w_amt = a; ctx.session.state = 'WAIT_W_METH';
-        return ctx.reply("ዘዴ ይምረጡ:", Markup.inlineKeyboard([[Markup.button.callback("Telebirr", "w_meth_Telebirr")]]));
-    }
-    if (ctx.session?.state === 'WAIT_W_ID') { ctx.session.w_id = txt; ctx.session.state = 'WAIT_W_NAME'; return ctx.reply("👤 ስም ያስገቡ::"); }
-    if (ctx.session?.state === 'WAIT_W_NAME') {
-        const { w_amt, method, w_id } = ctx.session; await User.findOneAndUpdate({ telegramId: uid }, { $inc: { balance: -w_amt } });
-        ctx.reply(`✅ ለAdmin ተልኳል::`);
-        if(ADMIN_ID) bot.telegram.sendMessage(ADMIN_ID, `🚨 WITHDRAWAL\nUser: ${uid}\nAmt: ${w_amt}\nID: ${w_id}\nName: ${txt}`);
+    if (ctx.session?.state === 'WAIT_W') {
+        const amt = parseInt(text); const u = await User.findOne({ telegramId: uid });
+        if (isNaN(amt) || amt < 50) return ctx.reply("ዝቅተኛ 50 ብር ነው ።");
+        if (amt > u.balance) return ctx.reply("በቂ Balance የለዎትም።");
+        ctx.reply(`✅ ለAdmin ተልኳል።`);
+        if(ADMIN_ID) bot.telegram.sendMessage(ADMIN_ID, `WITHDRAWAL: ${uid} - ${amt} Birr`);
         ctx.session = null; return;
     }
-    const r = parseBankSMS(txt);
-    if (r) {
-        const s = await VerifiedSMS.findOne({ refNumber: r.ref, isUsed: false });
-        if (s) {
-            s.isUsed = true; s.usedBy = uid; await s.save();
-            const u = await User.findOneAndUpdate({ telegramId: uid }, { $inc: { balance: s.amount } }, { new: true });
-            io.to(uid).emit('balance_update', u.balance); ctx.reply(`✅ Added ${s.amount} Birr!`);
+    const sms = parseBankSMS(text);
+    if (sms) {
+        const record = await VerifiedSMS.findOne({ refNumber: sms.ref, isUsed: false });
+        if (record) {
+            record.isUsed = true; record.usedBy = uid; await record.save();
+            const u = await User.findOneAndUpdate({ telegramId: uid }, { $inc: { balance: record.amount } }, { new: true });
+            io.to(uid).emit('balance_update', u.balance); ctx.reply(`✅ Added ${record.amount} Birr!`);
         }
     }
 });
 
-bot.action('pay_tele', (ctx) => ctx.reply(`${supportHeader}\n\n1. ወደ 0922573939 (SEID) ${ctx.session.amount || 10} ይላኩ\n\n2. መልዕክቱን Past ያርጉ 👇`));
-bot.action('pay_cbe', (ctx) => ctx.reply(`${supportHeader}\n\n1. ወደ 1000102526418 (SEID) ${ctx.session.amount || 10} ይላኩ\n\n2. መልዕክቱን Past ያርጉ 👇`));
-bot.action('support_trigger', (ctx) => ctx.reply(`🛠 Support:\n👉 @sya9744\n👉 @komodo27`));
-bot.action('bal', async (ctx) => { const u = await User.findOne({ telegramId: ctx.from.id.toString() }); ctx.reply(`💰 Balance: ${u?.balance || 0} Birr`); });
+bot.action('support_trigger', (ctx) => ctx.reply(`🛠 Support: @sya9744 / @komodo27`));
+bot.action('pay_tele', (ctx) => ctx.reply(`${supportHeader}\n\nወደ 0922573939 (SEID) ${ctx.session.amount || 10} ይላኩና መልዕክቱን Past ያርጉ 👇`));
+bot.action('pay_cbe', (ctx) => ctx.reply(`${supportHeader}\n\nወደ 1000102526418 (Acc) ${ctx.session.amount || 10} ያስገቡና መልዕክቱን Past ያርጉ 👇`));
 
 bot.launch();
 
 const publicPath = path.resolve(__dirname, 'public');
 app.use(express.static(publicPath));
-app.get('*', (req, res) => {
-    if (req.path.includes('.') && !req.path.endsWith('.html')) return res.status(404).end();
-    res.sendFile(path.join(publicPath, 'index.html'));
-});
-server.listen(PORT, '0.0.0.0', () => console.log(`🚀 Server running`));
+app.get('*', (req, res) => res.sendFile(path.join(publicPath, 'index.html')));
+server.listen(PORT, '0.0.0.0', () => console.log(`🚀 live on ${PORT}`));
