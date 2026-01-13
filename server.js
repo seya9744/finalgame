@@ -67,7 +67,7 @@ function checkServerWin(card, drawnNumbers) {
     return ([0,1,2,3,4].map(i => card[i][i]).every(n => drawn.has(n)) || [0,1,2,3,4].map(i => card[i][4-i]).every(n => drawn.has(n)));
 }
 
-let gameState = { phase: 'SELECTION', phaseEndTime: Date.now() + 40000, timer: 40, drawnNumbers: [], pot: 0, winner: null, totalPlayers: 0 };
+let gameState = { phase: 'SELECTION', phaseEndTime: Date.now() + 40000, timer: 40, drawnNumbers: [], pot: 0, winner: null, totalPlayers: 0, takenCards: [] };
 let players = {}; let socketToUser = {};
 
 setInterval(async () => {
@@ -76,21 +76,28 @@ setInterval(async () => {
     if (timeLeft < 0) timeLeft = 0;
     gameState.timer = timeLeft;
 
-    if (gameState.phase === 'SELECTION' && timeLeft <= 0) {
-        let total = 0; Object.values(players).forEach(p => { if (p.cards) total += p.cards.length; });
-        if (total >= 2) {
-            gameState.phase = 'GAMEPLAY';
-            for (let tid in players) {
-                if (players[tid].cards?.length > 0) {
-                    await User.findOneAndUpdate({ telegramId: tid }, { $inc: { balance: -(players[tid].cards.length * 10) } });
-                    const u = await User.findOne({ telegramId: tid });
-                    if(u) io.to(tid).emit('balance_update', u.balance);
+    if (gameState.phase === 'SELECTION') {
+        let allBought = [];
+        Object.values(players).forEach(p => { if (p.cards) allBought.push(...p.cards); });
+        gameState.totalPlayers = allBought.length;
+        gameState.pot = allBought.length * 10;
+        gameState.takenCards = allBought; // Broadcast to everyone
+
+        if (timeLeft <= 0) {
+            if (allBought.length >= 2) {
+                gameState.phase = 'GAMEPLAY';
+                for (let tid in players) {
+                    if (players[tid].cards?.length > 0) {
+                        await User.findOneAndUpdate({ telegramId: tid }, { $inc: { balance: -(players[tid].cards.length * 10) } });
+                        const u = await User.findOne({ telegramId: tid });
+                        if(u) io.to(tid).emit('balance_update', u.balance);
+                    }
                 }
-            }
-        } else { gameState.phaseEndTime = Date.now() + 40000; }
+            } else { gameState.phaseEndTime = Date.now() + 40000; }
+        }
     }
     if (gameState.phase === 'WINNER' && timeLeft <= 0) {
-        gameState = { phase: 'SELECTION', phaseEndTime: Date.now() + 40000, timer: 40, drawnNumbers: [], pot: 0, winner: null, totalPlayers: 0 };
+        gameState = { phase: 'SELECTION', phaseEndTime: Date.now() + 40000, timer: 40, drawnNumbers: [], pot: 0, winner: null, totalPlayers: 0, takenCards: [] };
         for (let tid in players) players[tid].cards = [];
         io.emit('restore_cards', []); 
     }
@@ -119,18 +126,16 @@ io.on('connection', (socket) => {
         } catch (e) {}
     });
 
-    // FIXED: Selection is now silent to prevent the re-select flicker glitch
     socket.on('buy_card', (cardIds) => {
         const tid = socketToUser[socket.id];
         if (tid && gameState.phase === 'SELECTION') {
             if (cardIds.length > 2) return;
             players[tid].cards = cardIds;
             
-            let total = 0;
-            Object.values(players).forEach(pl => { if(pl.cards) total += pl.cards.length; });
-            gameState.totalPlayers = total; 
-            gameState.pot = total * 10;
-            // No io.emit here during selection to stop the "Race Condition"
+            let allT = []; let total = 0;
+            Object.values(players).forEach(pl => { if(pl.cards) { allT.push(...pl.cards); total += pl.cards.length; } });
+            gameState.takenCards = allT; gameState.totalPlayers = total; gameState.pot = total * 10;
+            io.emit('game_tick', gameState); // Real-time sync
         }
     });
 
@@ -143,6 +148,12 @@ io.on('connection', (socket) => {
                 gameState.winner = { username: players[tid].username, prize, cardId: data.cardId };
                 await User.findOneAndUpdate({ telegramId: tid }, { $inc: { balance: prize, gamesWon: 1, totalPlayed: 1 } });
                 await GameRecord.create({ telegramId: tid, gameId: "BBU7EN", status: "Won", stake: players[tid].cards.length * 10, prize: prize });
+                for (let otherTid in players) {
+                    if (otherTid !== tid && players[otherTid].cards?.length > 0) {
+                        await User.findOneAndUpdate({ telegramId: otherTid }, { $inc: { totalPlayed: 1 } });
+                        await GameRecord.create({ telegramId: otherTid, gameId: "BBU7EN", status: "Lost", stake: players[otherTid].cards.length * 10, prize: 0 });
+                    }
+                }
                 const u = await User.findOne({ telegramId: tid });
                 io.to(tid).emit('balance_update', u.balance);
                 gameState.phase = 'WINNER'; gameState.phaseEndTime = Date.now() + 7000; io.emit('game_tick', gameState);
@@ -197,7 +208,7 @@ bot.on('contact', async (ctx) => {
     if (ex && !ex.isRegistered) {
         await User.findOneAndUpdate({ telegramId: ctx.from.id.toString() }, { phoneNumber: ctx.message.contact.phone_number, isRegistered: true, $inc: { balance: 10 } });
         msg = "\n🎁 ለእርሶ የ 10 ብር ቦነስ ተጨምሯል!";
-    }
+    } else { await User.findOneAndUpdate({ telegramId: ctx.from.id.toString() }, { phoneNumber: ctx.message.contact.phone_number, isRegistered: true }); }
     ctx.reply(`✅ ተመዝግበዋል!${msg}`, Markup.removeKeyboard());
     ctx.reply("Main Menu:", mainKeyboard(true));
 });
@@ -217,7 +228,7 @@ bot.on('text', async (ctx) => {
     if (ctx.session?.state === 'WAIT_W_AMT') {
         const a = parseInt(txt); const u = await User.findOne({ telegramId: uid });
         if (isNaN(a) || a < 50) return ctx.reply("ዝቅተኛ 50 ብር ነው ።");
-        if (a > u.balance) return ctx.reply("በቂ Balance የለዎአትም።");
+        if (a > u.balance) return ctx.reply("ገንዘብ ለማውጣት በቂ Balance የለዎአትም።");
         ctx.reply(`✅ የገንዘብ ማውጣት ጥያቄዎ ለAdmin ተልኳል::`);
         if(ADMIN_ID) bot.telegram.sendMessage(ADMIN_ID, `🚨 WITHDRAWAL\nUser: ${uid}\nAmt: ${a}`);
         ctx.session = null; return;
@@ -250,4 +261,4 @@ bot.launch();
 const publicPath = path.resolve(__dirname, 'public');
 app.use(express.static(publicPath));
 app.get('*', (req, res) => res.sendFile(path.join(publicPath, 'index.html')));
-server.listen(PORT, '0.0.0.0', () => console.log(`🚀 live`));
+server.listen(PORT, '0.0.0.0', () => console.log(`🚀 Live`));
