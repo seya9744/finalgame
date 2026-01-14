@@ -138,8 +138,9 @@ io.on('connection', (socket) => {
             Object.values(players).forEach(pl => { if(pl.cards) { allT.push(...pl.cards); total += pl.cards.length; } });
             gameState.takenCards = allT; gameState.totalPlayers = total; gameState.pot = total * 10;
             
-            // FIXED: Immediate broadcast to stop the 1-second lag flicker
-            io.emit('game_tick', gameState); 
+            // 🛠️ FIX 4: Removed immediate broadcast
+            // We rely on the setInterval loop (every 1s) to update clients.
+            // This prevents "flicker storm" when multiple people click fast.
         }
     });
 
