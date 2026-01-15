@@ -165,7 +165,7 @@ io.on('connection', (socket) => {
         else if (period === 'Weekly') startTime.setDate(startTime.getDate() - 7);
         else startTime = new Date(0);
         const top = await GameRecord.aggregate([
-            { $match: { date: { $gte: startTime }, status: "Won" } },
+            { $match: { date: { $gte: startTime }, } },
             { $group: { _id: "$telegramId", count: { $sum: 1 }, username: { $first: "$username" } } },
             { $sort: { count: -1 } },
             { $limit: 10 },
@@ -278,4 +278,5 @@ const publicPath = path.resolve(__dirname, 'public');
 app.use(express.static(publicPath));
 app.get('*', (req, res) => res.sendFile(path.join(publicPath, 'index.html')));
 server.listen(PORT, '0.0.0.0', () => console.log(`🚀 live on ${PORT}`));
+
 
