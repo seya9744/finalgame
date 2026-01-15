@@ -30,7 +30,7 @@ const User = mongoose.model('User', new mongoose.Schema({
 }));
 
 const GameRecord = mongoose.model('GameRecord', new mongoose.Schema({
-    telegramId: String, gameId: String, status: String, stake: Number, prize: Number, date: { type: Date, default: Date.now }
+    telegramId: String, username: String, gameId: String, status: String, stake: Number, prize: Number, date: { type: Date, default: Date.now }
 }));
 
 const VerifiedSMS = mongoose.model('VerifiedSMS', new mongoose.Schema({
@@ -108,7 +108,9 @@ setInterval(() => {
 io.on('connection', (socket) => {
     socket.on('register_user', async (data) => {
         try {
-            const urlParams = new URLSearchParams(data.initData); const user = JSON.parse(urlParams.get('user')); const tid = user.id.toString();
+            const urlParams = new URLSearchParams(data.initData); 
+            const user = JSON.parse(urlParams.get('user')); 
+            const tid = user.id.toString();
             socket.join(tid); socketToUser[socket.id] = tid;
             const u = await User.findOne({ telegramId: tid });
             if (u && u.isRegistered) {
@@ -140,16 +142,58 @@ io.on('connection', (socket) => {
                 gameState.phase = 'WINNER';
                 gameState.winner = { username: players[tid].username, prize, cardId: data.cardId };
                 gameState.phaseEndTime = Date.now() + 7000;
+                
                 await User.findOneAndUpdate({ telegramId: tid }, { $inc: { balance: prize, gamesWon: 1, totalPlayed: 1 } });
+                await GameRecord.create({ telegramId: tid, username: players[tid].username, gameId: "BBU7EN", status: "Won", stake: players[tid].cards.length * 10, prize: prize });
+                
+                for (let otherTid in players) {
+                    if (otherTid !== tid && players[otherTid].cards?.length > 0) {
+                        await User.findOneAndUpdate({ telegramId: otherTid }, { $inc: { totalPlayed: 1 } });
+                        await GameRecord.create({ telegramId: otherTid, username: players[otherTid].username, gameId: "BBU7EN", status: "Lost", stake: players[otherTid].cards.length * 10, prize: 0 });
+                    }
+                }
                 const u = await User.findOne({ telegramId: tid });
                 io.to(tid).emit('balance_update', u.balance);
                 io.emit('game_tick', gameState);
             }
         }
     });
+
+    socket.on('get_leaderboard', async (period) => {
+        let startTime = new Date();
+        if (period === 'Daily') startTime.setHours(0,0,0,0);
+        else if (period === 'Weekly') startTime.setDate(startTime.getDate() - 7);
+        else startTime = new Date(0);
+        const top = await GameRecord.aggregate([
+            { $match: { date: { $gte: startTime }, status: "Won" } },
+            { $group: { _id: "$telegramId", count: { $sum: 1 }, username: { $first: "$username" } } },
+            { $sort: { count: -1 } },
+            { $limit: 10 },
+            { $project: { username: 1, totalPlayed: "$count" } }
+        ]);
+        socket.emit('leaderboard_data', top);
+    });
+
+    socket.on('get_history', async (data) => {
+        try {
+            const urlParams = new URLSearchParams(data.initData); const user = JSON.parse(urlParams.get('user'));
+            const history = await GameRecord.find({ telegramId: user.id.toString() }).sort({ date: -1 }).limit(15);
+            socket.emit('history_data', history);
+        } catch (e) {}
+    });
+
+    socket.on('get_wallet_history', async (data) => {
+        try {
+            const urlParams = new URLSearchParams(data.initData); const user = JSON.parse(urlParams.get('user'));
+            const deposits = await VerifiedSMS.find({ usedBy: user.id.toString() }).sort({ createdAt: -1 }).limit(10);
+            socket.emit('wallet_history_data', deposits);
+        } catch (e) {}
+    });
+
+    socket.on('disconnect', () => { delete socketToUser[socket.id]; });
 });
 
-// --- 6. BOT MENU ---
+// --- BOT MENU ---
 const bot = new Telegraf(BOT_TOKEN);
 bot.use(session());
 
@@ -223,7 +267,6 @@ bot.on('text', async (ctx) => {
         if(ADMIN_ID) bot.telegram.sendMessage(ADMIN_ID, `🚨 WITHDRAWAL REQUEST\nUser: ${uid}\nAmount: ${amt} Birr`);
         ctx.session = null; return;
     }
-    // Simple SMS parsing logic (ensure parseBankSMS is defined in your utils)
 });
 
 bot.action('support_trigger', (ctx) => ctx.reply(`🛠 Support: @sya9744 / @komodo27`));
@@ -231,7 +274,6 @@ bot.action('pay_tele', (ctx) => ctx.reply(`${supportHeader}\n\nወደ 0922573939
 bot.action('pay_cbe', (ctx) => ctx.reply(`${supportHeader}\n\nወደ 1000102526418 (Acc) ${ctx.session.amount || 10} ያስገቡና መልዕክቱን Paste ያርጉ 👇`));
 
 bot.launch();
-
 const publicPath = path.resolve(__dirname, 'public');
 app.use(express.static(publicPath));
 app.get('*', (req, res) => res.sendFile(path.join(publicPath, 'index.html')));
