@@ -195,13 +195,13 @@ io.on('connection', (socket) => {
         let players;
 
         if (period === 'All-Time') {
-            // 1. Get EVERY user who has played at least 1 game
+            // 1. Get EVERY user from the User Profile collection
             players = await User.find({ totalPlayed: { $gt: 0 } })
-                .sort({ totalPlayed: -1 }) // Rank by most games played
+                .sort({ totalPlayed: -1 })
                 .limit(20)
-                .select('username totalPlayed -_id'); // Only get name and count
+                .select('username totalPlayed -_id');
         } else {
-            // 2. For Daily/Weekly, we still need to use GameRecord
+            // 2. For Daily/Weekly, use the GameRecord history
             let startTime = new Date();
             if (period === 'Daily') startTime.setHours(0, 0, 0, 0);
             else if (period === 'Weekly') startTime.setDate(startTime.getDate() - 7);
@@ -216,21 +216,14 @@ io.on('connection', (socket) => {
             ]);
         }
 
+        // Send the data to the frontend
         socket.emit('leaderboard_data', players);
-    } catch (err) {
-        console.error(err);
-        socket.emit('leaderboard_data', []);
-    }
-});
-
-        console.log("Leaderboard Results:", top); // This will show in your Render logs
-        socket.emit('leaderboard_data', top);
     } catch (err) {
         console.error("Leaderboard Error:", err);
         socket.emit('leaderboard_data', []);
     }
 });
-
+    
     socket.on('get_history', async (data) => {
         try {
             const urlParams = new URLSearchParams(data.initData); const user = JSON.parse(urlParams.get('user'));
@@ -335,6 +328,7 @@ const publicPath = path.resolve(__dirname, 'public');
 app.use(express.static(publicPath));
 app.get('*', (req, res) => res.sendFile(path.join(publicPath, 'index.html')));
 server.listen(PORT, '0.0.0.0', () => console.log(`🚀 live on ${PORT}`));
+
 
 
 
