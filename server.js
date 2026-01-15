@@ -160,21 +160,42 @@ io.on('connection', (socket) => {
     });
 
     socket.on('get_leaderboard', async (period) => {
+    try {
         let startTime = new Date();
-        if (period === 'Daily') startTime.setHours(0,0,0,0);
+        if (period === 'Daily') startTime.setHours(0, 0, 0, 0);
         else if (period === 'Weekly') startTime.setDate(startTime.getDate() - 7);
         else startTime = new Date(0);
-          const top = await GameRecord.aggregate([
+
+        const top = await GameRecord.aggregate([
             { $match: { date: { $gte: startTime } } },
-            { $group: { _id: "$telegramId", count: { $sum: 1 } } },,
-            { $lookup: { from: "users", localField: "_id", foreignField: "telegramId", as: "u" } },
+            { $group: { _id: "$telegramId", count: { $sum: 1 } } },
+            { 
+              $lookup: { 
+                from: "users", // Double-check: must match your MongoDB collection name
+                localField: "_id", 
+                foreignField: "telegramId", 
+                as: "u" 
+              } 
+            },
             { $unwind: "$u" },
-            { $project: { username: "$u.username", totalPlayed: "$count" } },
+            { 
+              $project: { 
+                _id: 0,
+                username: "$u.username", 
+                totalPlayed: "$count" 
+              } 
+            },
             { $sort: { totalPlayed: -1 } },
             { $limit: 10 }
-       ]);
+        ]);
+
+        console.log("Leaderboard Results:", top); // This will show in your Render logs
         socket.emit('leaderboard_data', top);
-    });
+    } catch (err) {
+        console.error("Leaderboard Error:", err);
+        socket.emit('leaderboard_data', []);
+    }
+});
 
     socket.on('get_history', async (data) => {
         try {
@@ -280,6 +301,7 @@ const publicPath = path.resolve(__dirname, 'public');
 app.use(express.static(publicPath));
 app.get('*', (req, res) => res.sendFile(path.join(publicPath, 'index.html')));
 server.listen(PORT, '0.0.0.0', () => console.log(`🚀 live on ${PORT}`));
+
 
 
 
