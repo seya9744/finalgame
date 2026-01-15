@@ -134,60 +134,94 @@ io.on('connection', (socket) => {
     });
 
     socket.on('claim_win', async (data) => {
-        const tid = socketToUser[socket.id];
-        if (tid && gameState.phase === 'GAMEPLAY' && !gameState.winner) {
-            const card = generateServerCard(data.cardId);
-            if (checkServerWin(card, gameState.drawnNumbers)) {
-                const prize = Math.floor(gameState.pot * 0.8);
-                gameState.phase = 'WINNER';
-                gameState.winner = { username: players[tid].username, prize, cardId: data.cardId };
-                gameState.phaseEndTime = Date.now() + 7000;
-                
-                await User.findOneAndUpdate({ telegramId: tid }, { $inc: { balance: prize, gamesWon: 1, totalPlayed: 1 } });
-                await GameRecord.create({ telegramId: otherTid, username: players[otherTid].username, gameId: "BBU7EN", status: "Won", stake: players[tid].cards.length * 10, prize: prize });
-                
-                for (let otherTid in players) {
-                    if (otherTid !== tid && players[otherTid].cards?.length > 0) {
-                        await User.findOneAndUpdate({ telegramId: otherTid }, { $inc: { totalPlayed: 1 } });
-                        await GameRecord.create({ telegramId: otherTid, username: players[otherTid].username, gameId: "BBU7EN", status: "Lost", stake: players[otherTid].cards.length * 10, prize: 0 });
-                    }
+    const tid = socketToUser[socket.id];
+    
+    if (tid && gameState.phase === 'GAMEPLAY' && !gameState.winner) {
+        const card = generateServerCard(data.cardId);
+
+        if (checkServerWin(card, gameState.drawnNumbers)) {
+            const prize = Math.floor(gameState.pot * 0.8);
+            
+            // 1. Set the game state to Winner immediately
+            gameState.phase = 'WINNER';
+            gameState.winner = { username: players[tid].username, prize, cardId: data.cardId };
+            gameState.phaseEndTime = Date.now() + 7000;
+
+            // 2. Loop through EVERYONE who was in the game
+            for (let pTid in players) {
+                const isWinner = (pTid === tid);
+                const pCards = players[pTid].cards || [];
+
+                // Only process players who actually bought cards
+                if (pCards.length > 0) {
+                    
+                    // Update the User Profile (Balance and Total Played count)
+                    await User.findOneAndUpdate(
+                        { telegramId: pTid }, 
+                        { 
+                            $inc: { 
+                                balance: isWinner ? prize : 0, 
+                                gamesWon: isWinner ? 1 : 0,
+                                totalPlayed: 1 // Everyone gets +1 game played
+                            } 
+                        }
+                    );
+
+                    // Create the History Record for the Leaderboard
+                    await GameRecord.create({
+                        telegramId: pTid,
+                        username: players[pTid].username,
+                        gameId: "BBU7EN",
+                        status: isWinner ? "Won" : "Lost",
+                        stake: pCards.length * 10,
+                        prize: isWinner ? prize : 0,
+                        date: new Date()
+                    });
                 }
-                const u = await User.findOne({ telegramId: tid });
-                io.to(tid).emit('balance_update', u.balance);
-                io.emit('game_tick', gameState);
             }
+
+            // 3. Update the winner's screen with their new balance
+            const winUser = await User.findOne({ telegramId: tid });
+            if (winUser) io.to(tid).emit('balance_update', winUser.balance);
+
+            // 4. Tell everyone the game is over
+            io.emit('game_tick', gameState);
         }
-    });
+    }
+});
 
-    socket.on('get_leaderboard', async (period) => {
+   socket.on('get_leaderboard', async (period) => {
     try {
-        let startTime = new Date();
-        if (period === 'Daily') startTime.setHours(0, 0, 0, 0);
-        else if (period === 'Weekly') startTime.setDate(startTime.getDate() - 7);
-        else startTime = new Date(0);
+        let players;
 
-        const top = await GameRecord.aggregate([
-            { $match: { date: { $gte: startTime } } },
-            { $group: { _id: "$telegramId", count: { $sum: 1 } } },
-            { 
-              $lookup: { 
-                from: "users", // Double-check: must match your MongoDB collection name
-                localField: "_id", 
-                foreignField: "telegramId", 
-                as: "u" 
-              } 
-            },
-            { $unwind: "$u" },
-            { 
-              $project: { 
-                _id: 0,
-                username: "$u.username", 
-                totalPlayed: "$count" 
-              } 
-            },
-            { $sort: { totalPlayed: -1 } },
-            { $limit: 10 }
-        ]);
+        if (period === 'All-Time') {
+            // 1. Get EVERY user who has played at least 1 game
+            players = await User.find({ totalPlayed: { $gt: 0 } })
+                .sort({ totalPlayed: -1 }) // Rank by most games played
+                .limit(20)
+                .select('username totalPlayed -_id'); // Only get name and count
+        } else {
+            // 2. For Daily/Weekly, we still need to use GameRecord
+            let startTime = new Date();
+            if (period === 'Daily') startTime.setHours(0, 0, 0, 0);
+            else if (period === 'Weekly') startTime.setDate(startTime.getDate() - 7);
+
+            players = await GameRecord.aggregate([
+                { $match: { date: { $gte: startTime } } },
+                { $group: { _id: "$telegramId", count: { $sum: 1 } } },
+                { $lookup: { from: "users", localField: "_id", foreignField: "telegramId", as: "u" } },
+                { $unwind: "$u" },
+                { $project: { _id: 0, username: "$u.username", totalPlayed: "$count" } },
+                { $sort: { totalPlayed: -1 } }
+            ]);
+        }
+
+        socket.emit('leaderboard_data', players);
+    } catch (err) {
+        console.error(err);
+        socket.emit('leaderboard_data', []);
+    }
+});
 
         console.log("Leaderboard Results:", top); // This will show in your Render logs
         socket.emit('leaderboard_data', top);
@@ -301,6 +335,7 @@ const publicPath = path.resolve(__dirname, 'public');
 app.use(express.static(publicPath));
 app.get('*', (req, res) => res.sendFile(path.join(publicPath, 'index.html')));
 server.listen(PORT, '0.0.0.0', () => console.log(`🚀 live on ${PORT}`));
+
 
 
 
