@@ -144,7 +144,7 @@ io.on('connection', (socket) => {
                 gameState.phaseEndTime = Date.now() + 7000;
                 
                 await User.findOneAndUpdate({ telegramId: tid }, { $inc: { balance: prize, gamesWon: 1, totalPlayed: 1 } });
-                await GameRecord.create({ telegramId: tid, username: players[tid].username, gameId: "BBU7EN", status: "Won", stake: players[tid].cards.length * 10, prize: prize });
+                await GameRecord.create({ telegramId: otherTid, username: players[otherTid].username, gameId: "BBU7EN", status: "Won", stake: players[tid].cards.length * 10, prize: prize });
                 
                 for (let otherTid in players) {
                     if (otherTid !== tid && players[otherTid].cards?.length > 0) {
@@ -278,3 +278,4 @@ const publicPath = path.resolve(__dirname, 'public');
 app.use(express.static(publicPath));
 app.get('*', (req, res) => res.sendFile(path.join(publicPath, 'index.html')));
 server.listen(PORT, '0.0.0.0', () => console.log(`🚀 live on ${PORT}`));
+
