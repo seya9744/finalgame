@@ -164,13 +164,15 @@ io.on('connection', (socket) => {
         if (period === 'Daily') startTime.setHours(0,0,0,0);
         else if (period === 'Weekly') startTime.setDate(startTime.getDate() - 7);
         else startTime = new Date(0);
-        const top = await GameRecord.aggregate([
-            { $match: { date: { $gte: startTime }, } },
-            { $group: { _id: "$telegramId", count: { $sum: 1 }, username: { $first: "$username" } } },
-            { $sort: { count: -1 } },
-            { $limit: 10 },
-            { $project: { username: 1, totalPlayed: "$count" } }
-        ]);
+          const top = await GameRecord.aggregate([
+            { $match: { date: { $gte: startTime } } },
+            { $group: { _id: "$telegramId", count: { $sum: 1 } } },,
+            { $lookup: { from: "users", localField: "_id", foreignField: "telegramId", as: "u" } },
+            { $unwind: "$u" },
+            { $project: { username: "$u.username", totalPlayed: "$count" } },
+            { $sort: { totalPlayed: -1 } },
+            { $limit: 10 }
+       ]);
         socket.emit('leaderboard_data', top);
     });
 
@@ -278,5 +280,6 @@ const publicPath = path.resolve(__dirname, 'public');
 app.use(express.static(publicPath));
 app.get('*', (req, res) => res.sendFile(path.join(publicPath, 'index.html')));
 server.listen(PORT, '0.0.0.0', () => console.log(`🚀 live on ${PORT}`));
+
 
 
