@@ -102,7 +102,7 @@ setInterval(() => {
         let n; do { n = Math.floor(Math.random() * 75) + 1; } while (gameState.drawnNumbers.includes(n));
         gameState.drawnNumbers.push(n); io.emit('number_drawn', gameState.drawnNumbers);
     }
-}, 2500);
+}, 4000);
 
 // --- SOCKETS ---
 io.on('connection', (socket) => {
@@ -328,6 +328,7 @@ const publicPath = path.resolve(__dirname, 'public');
 app.use(express.static(publicPath));
 app.get('*', (req, res) => res.sendFile(path.join(publicPath, 'index.html')));
 server.listen(PORT, '0.0.0.0', () => console.log(`🚀 live on ${PORT}`));
+
 
 
 
